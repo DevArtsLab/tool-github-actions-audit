@@ -179,6 +179,15 @@ def gh_text(args: list[str]) -> str | None:
     return proc.stdout if proc.returncode == 0 else None
 
 
+def disable_cmd(full_name: str, wf_id) -> str:
+    """The literal gh command used for a given disable action."""
+    if wf_id == ALL_ACTIONS:
+        return (f"gh api -X PUT repos/{full_name}/actions/permissions "
+                f"-F enabled=false")
+    return (f"gh api -X PUT "
+            f"repos/{full_name}/actions/workflows/{wf_id}/disable")
+
+
 def declared_trigger(full_name: str, wf_path: str) -> str:
     """Read the workflow YAML and describe its `on:` trigger in words."""
     raw = gh_text([
@@ -335,23 +344,23 @@ def print_repo_detail(info: dict) -> None:
 
 def confirm_and_execute(plan: list[tuple[str, str, int | None]]) -> None:
     """plan entries: (repo_full_name, label, workflow_id|ALL_ACTIONS)."""
-    by_repo: dict[str, list[str]] = {}
-    for repo, label, _ in plan:
-        by_repo.setdefault(repo, []).append(label)
+    by_repo: dict[str, list[tuple[str, object]]] = {}
+    for repo, label, wf_id in plan:
+        by_repo.setdefault(repo, []).append((label, wf_id))
 
     tree = Tree(f"[bold red]{len(plan)} pending change(s)[/]")
-    for repo, labels in by_repo.items():
+    for repo, items in by_repo.items():
         node = tree.add(f"[cyan]{repo}[/]")
-        for label in labels:
-            marker = (
-                "[bold red]repo-wide[/]" if "entire repo" in label else label
-            )
-            node.add(marker)
+        for label, wf_id in items:
+            node.add(f"{label}\n[dim]$ {disable_cmd(repo, wf_id)}[/]")
     console.print(
         Panel(
             tree,
             title="[bold red]Confirmation required[/]",
-            subtitle="API-level changes only | no commits on any repo",
+            subtitle=(
+                "stops workflows via the API only | never runs them | "
+                "no commits on any repo"
+            ),
             border_style="red",
         )
     )
@@ -507,10 +516,13 @@ def main() -> None:
         active_wfs.sort(key=lambda w: w["name"] == "CI")
         wf_choices = [
             Choice(
-                title="!! Disable ALL GitHub Actions on this repo",
+                title="STOP everything - disable ALL GitHub Actions "
+                      "on this repo",
                 description=(
-                    "repo-wide kill switch; blocks every workflow, "
-                    "including any that arrive later via syncs"
+                    f"runs: {disable_cmd(full_name, ALL_ACTIONS)} | turns "
+                    f"off the Actions feature repo-wide (the Actions tab "
+                    f"shows 'disabled'); per-workflow states are kept and "
+                    f"return if re-enabled"
                 ),
                 value=ALL_ACTIONS,
             )
@@ -519,13 +531,15 @@ def main() -> None:
             act = wf_activity(info, w["id"])
             trig = declared_trigger(full_name, w["path"])
             observed = (
-                f"file {w['path'].split('/')[-1]} | last ran "
+                f"runs: {disable_cmd(full_name, w['id'])} | "
+                f"stops only this workflow (shows disabled in the "
+                f"Actions tab) | last ran "
                 f"{act['last'] or 'never in recent sample'} | "
                 f"branches seen: {', '.join(act['branches']) or 'none'}"
             )
             wf_choices.append(
                 Choice(
-                    title=f"{w['name']}  |  runs {trig}",
+                    title=f"DISABLE '{w['name']}'  |  currently runs {trig}",
                     description=observed,
                     value=w["id"],
                 )
@@ -538,7 +552,8 @@ def main() -> None:
             )
         )
         picked = questionary.checkbox(
-            f"{full_name}: select workflows to DISABLE:",
+            f"{full_name}: select workflows to STOP "
+            f"(nothing here runs workflows, it only disables them):",
             choices=wf_choices,
             style=QSTYLE,
             instruction="space = check, enter = next repo, "
