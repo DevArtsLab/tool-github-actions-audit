@@ -27,18 +27,52 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
-from datetime import date, timedelta
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, timedelta
 
 import questionary
-from questionary import Choice
+from questionary import Choice, Style
+from rich import box
 from rich.console import Console
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+)
 from rich.table import Table
+from rich.tree import Tree
 
 console = Console(width=max(140, shutil.get_terminal_size().columns))
 ALL_ACTIONS = "__disable_entire_repo__"
+WINDOW_DAYS = 30
+
+QSTYLE = Style(
+    [
+        ("qmark", "fg:#5f87ff bold"),
+        ("question", "bold"),
+        ("pointer", "fg:#ff5f5f bold"),
+        ("highlighted", "fg:#5f87ff bold"),
+        ("selected", "fg:#87af5f"),
+        ("instruction", "fg:#808080"),
+        ("answer", "fg:#87af5f bold"),
+    ]
+)
+
+
+def heat(n: int) -> str:
+    """Color tier for a run count."""
+    if n >= 50:
+        return "bold red"
+    if n >= 10:
+        return "yellow"
+    if n > 0:
+        return "white"
+    return "dim"
 
 
 def gh_json(args: list[str]):
@@ -80,7 +114,7 @@ def list_repos(owner: str) -> list[dict]:
     return json.loads(proc.stdout)
 
 
-def scan_repo(full_name: str) -> dict:
+def scan_repo(full_name: str, start: str, end: str) -> dict:
     """Fetch workflows + recent runs for one repo."""
     info: dict = {
         "full_name": full_name,
@@ -99,8 +133,6 @@ def scan_repo(full_name: str) -> dict:
     if recent:
         info["runs_total"] = recent.get("total_count", info["runs_total"])
         info["runs"] = recent.get("workflow_runs", [])
-    start = (date.today() - timedelta(days=30)).isoformat()
-    end = date.today().isoformat()
     win = gh_json(
         [f"repos/{full_name}/actions/runs?per_page=1&created={start}..{end}"]
     )
@@ -139,20 +171,24 @@ def repo_actions_enabled(full_name: str) -> bool | None:
     return p.get("enabled") if p else None
 
 
-def print_scan_table(rows: list[dict], meta: dict[str, dict]) -> None:
+def print_scan_table(rows: list[dict], meta: dict[str, dict],
+                     start: str, end: str) -> None:
     table = Table(
         title="GitHub Actions usage by repository",
         caption=(
-            "All time = total workflow runs ever. Last 30d = runs in the "
-            "last 30 days. Branches/Events sampled from the 50 most "
-            "recent runs."
+            f"All time = total workflow runs ever. Last {WINDOW_DAYS}d = "
+            f"runs {start} .. {end}. Branches/Events sampled from the 50 "
+            f"most recent runs."
         ),
+        box=box.ROUNDED,
+        header_style="bold cyan",
         show_lines=True,
+        row_styles=["", "on #16161e"],
     )
     table.add_column("Repo", style="cyan", no_wrap=True)
-    table.add_column("Kind")
+    table.add_column("Kind", justify="center")
     table.add_column("All time", justify="right")
-    table.add_column("Last 30d", justify="right")
+    table.add_column(f"Last {WINDOW_DAYS}d", justify="right")
     table.add_column("Active workflows")
     table.add_column("Branches seen")
     table.add_column("Events")
@@ -163,34 +199,45 @@ def print_scan_table(rows: list[dict], meta: dict[str, dict]) -> None:
                         if w.get("state") == "active"]
         wf_cell = ", ".join(active_names)
         if len(active_names) < len(wfs):
-            wf_cell += f"  ({len(active_names)}/{len(wfs)} active)"
+            wf_cell += f"  [dim]({len(active_names)}/{len(wfs)} active)[/]"
         branches = sorted({r.get("head_branch") for r in info["runs"]
                            if r.get("head_branch")})
         events = sorted({r.get("event") for r in info["runs"]
                          if r.get("event")})
-        kind = "fork" if m["isFork"] else "own"
+        if m["isFork"]:
+            kind = "[magenta]fork[/]"
+        else:
+            kind = "[green]own[/]"
         if m["isPrivate"]:
-            kind += "/priv"
+            kind += "[dim]/priv[/]"
+        n30 = info["runs_30d"]
         table.add_row(
             info["full_name"].split("/", 1)[-1], kind,
             str(info["runs_total"]),
-            str(info["runs_30d"]),
-            wf_cell or f"- ({len(wfs)} disabled)",
+            f"[{heat(n30)}]{n30}[/]",
+            wf_cell or f"[dim]- ({len(wfs)} disabled)[/]",
             ", ".join(branches[:6]) + (" ..." if len(branches) > 6 else ""),
             ", ".join(events),
+            style="" if n30 else "dim",
         )
     console.print(table)
 
 
 def print_repo_detail(info: dict) -> None:
     enabled = repo_actions_enabled(info["full_name"])
-    console.rule(f"[bold]{info['full_name']}")
-    console.print(
-        f"Repo-wide Actions: [bold]{'enabled' if enabled else 'disabled' if enabled is False else 'unknown'}[/]"
+    status = (
+        "[green]enabled[/]" if enabled
+        else "[red]disabled[/]" if enabled is False
+        else "[dim]unknown[/]"
     )
-    table = Table(show_lines=True)
+    table = Table(
+        box=box.ROUNDED,
+        header_style="bold cyan",
+        show_lines=True,
+        row_styles=["", "on #16161e"],
+    )
     table.add_column("Workflow", style="cyan")
-    table.add_column("State")
+    table.add_column("State", justify="center")
     table.add_column("File")
     table.add_column("Events")
     table.add_column("Branches")
@@ -205,32 +252,66 @@ def print_repo_detail(info: dict) -> None:
             "disabled_manually": f"[yellow]{state}[/]",
             "disabled_inactivity": f"[red]{state}[/]",
         }.get(state, state)
+        mins_cell = (
+            f"[{heat(int(mins))}]{mins:.1f}[/]" if mins is not None else "-"
+        )
         table.add_row(
             w["name"], colored, w["path"].split("/")[-1],
             ", ".join(act["events"]) or "-",
             ", ".join(act["branches"]) or "-",
             act["last"] or "-",
-            f"{mins:.1f}" if mins is not None else "-",
+            mins_cell,
         )
-    console.print(table)
+    console.print(
+        Panel(
+            table,
+            title=f"[bold]{info['full_name']}[/]",
+            subtitle=f"repo-wide Actions: {status}",
+            border_style="blue",
+        )
+    )
 
 
 def confirm_and_execute(plan: list[tuple[str, str, int | None]]) -> None:
     """plan entries: (repo_full_name, label, workflow_id|ALL_ACTIONS)."""
-    console.rule("[bold red]Confirmation required")
-    console.print("The following changes will be applied via the GitHub API.")
-    console.print("They do NOT create commits on any repository.\n")
-    for i, (repo, label, _) in enumerate(plan, 1):
-        console.print(f"  {i}. [cyan]{repo}[/] -> {label}")
+    by_repo: dict[str, list[str]] = {}
+    for repo, label, _ in plan:
+        by_repo.setdefault(repo, []).append(label)
+
+    tree = Tree(f"[bold red]{len(plan)} pending change(s)[/]")
+    for repo, labels in by_repo.items():
+        node = tree.add(f"[cyan]{repo}[/]")
+        for label in labels:
+            marker = (
+                "[bold red]repo-wide[/]" if "entire repo" in label else label
+            )
+            node.add(marker)
+    console.print(
+        Panel(
+            tree,
+            title="[bold red]Confirmation required[/]",
+            subtitle="API-level changes only | no commits on any repo",
+            border_style="red",
+        )
+    )
     if not questionary.confirm(
-        f"\nApply {len(plan)} change(s)?", default=False
+        f"Apply {len(plan)} change(s)?",
+        default=False,
+        style=QSTYLE,
+        instruction="No or ctrl+c = exit with no changes",
     ).ask():
-        console.print("Aborted. Nothing was changed.")
+        console.print("[dim]Aborted. Nothing was changed.[/]")
         return
-    results = Table(title="Results")
+
+    results = Table(
+        title="Results",
+        box=box.ROUNDED,
+        header_style="bold cyan",
+        show_lines=True,
+    )
     results.add_column("Repo")
     results.add_column("Action")
-    results.add_column("Status")
+    results.add_column("Status", justify="center")
     for repo, label, wf_id in plan:
         if wf_id == ALL_ACTIONS:
             err = gh_write([
@@ -244,7 +325,8 @@ def confirm_and_execute(plan: list[tuple[str, str, int | None]]) -> None:
             ])
         results.add_row(
             repo, label,
-            "[green]done[/]" if err is None else f"[red]failed: {err}[/]",
+            "[bold green]done[/]" if err is None
+            else f"[bold red]failed: {err}[/]",
         )
     console.print(results)
 
@@ -262,20 +344,46 @@ def main() -> None:
     owner = args.owner or authed_login()
     if not owner:
         owner = questionary.text(
-            "GitHub owner (user or org) to audit:").ask()
+            "GitHub owner (user or org) to audit:", style=QSTYLE).ask()
         if not owner:
             sys.exit("No owner given.")
 
-    console.print(f"Scanning [bold]{owner}[/] ...")
+    start = (date.today() - timedelta(days=WINDOW_DAYS)).isoformat()
+    end = date.today().isoformat()
+    mode = "read-only scan" if args.scan_only else "interactive"
+    scope = "forks only" if args.forks_only else "all repos"
+    console.print(
+        Panel.fit(
+            f"[bold cyan]gha_audit[/]  |  owner: [bold]{owner}[/]  |  "
+            f"window: {start} .. {end}  |  mode: {mode}, {scope}",
+            border_style="cyan",
+        )
+    )
+
     repos = list_repos(owner)
     meta = {r["nameWithOwner"]: r for r in repos}
     names = [r["nameWithOwner"] for r in repos
              if not args.forks_only or r["isFork"]]
 
     scanned: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        for info in ex.map(scan_repo, names):
-            scanned[info["full_name"]] = info
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Scanning repos", total=len(names))
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futures = {ex.submit(scan_repo, n, start, end): n
+                       for n in names}
+            for fut in as_completed(futures):
+                info = fut.result()
+                scanned[info["full_name"]] = info
+                progress.update(
+                    task, advance=1,
+                    description=f"Scanned {info['full_name'].split('/')[-1]}",
+                )
 
     rows = sorted(
         (i for i in scanned.values()
@@ -285,7 +393,18 @@ def main() -> None:
     if not rows:
         console.print("No repositories with Actions activity found.")
         return
-    print_scan_table(rows, meta)
+
+    forks = sum(1 for i in rows if meta[i["full_name"]]["isFork"])
+    console.print(
+        Panel.fit(
+            f"scanned: [bold]{len(names)}[/]  |  with Actions activity: "
+            f"[bold]{len(rows)}[/]  |  forks: [bold]{forks}[/]  |  "
+            f"runs last {WINDOW_DAYS}d: "
+            f"[bold]{sum(i['runs_30d'] for i in rows)}[/]",
+            border_style="blue",
+        )
+    )
+    print_scan_table(rows, meta, start, end)
 
     if args.scan_only:
         return
@@ -305,14 +424,16 @@ def main() -> None:
     selected = questionary.checkbox(
         "Select repositories to inspect/manage:",
         choices=choices,
+        style=QSTYLE,
         instruction="space = check, enter = continue, "
                     "enter on empty = exit, ctrl+c = cancel",
     ).ask()
     if selected is None:
-        console.print("Cancelled. No changes were made.")
+        console.print("[dim]Cancelled. No changes were made.[/]")
         return
     if not selected:
-        console.print("No repositories selected. Done, nothing changed.")
+        console.print("[dim]No repositories selected. Done, "
+                      "nothing changed.[/]")
         return
 
     plan: list[tuple[str, str, int | None]] = []
@@ -341,15 +462,16 @@ def main() -> None:
         picked = questionary.checkbox(
             f"{full_name}: select workflows to DISABLE:",
             choices=wf_choices,
+            style=QSTYLE,
             instruction="space = check, enter = next repo, "
                         "enter on empty = skip this repo, "
                         "ctrl+c = cancel all",
         ).ask()
         if picked is None:
-            console.print("Cancelled. No changes were made.")
+            console.print("[dim]Cancelled. No changes were made.[/]")
             return
         if not picked:
-            console.print(f"Skipped {full_name}, no changes.")
+            console.print(f"[dim]Skipped {full_name}, no changes.[/]")
             continue
         for pid in picked:
             label = ("disable entire repo Actions"
@@ -360,7 +482,8 @@ def main() -> None:
             plan.append((full_name, label, pid))
 
     if not plan:
-        console.print("Nothing selected to disable. Done, nothing changed.")
+        console.print("[dim]Nothing selected to disable. Done, "
+                      "nothing changed.[/]")
         return
     confirm_and_execute(plan)
 
@@ -369,4 +492,4 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        console.print("\nCancelled. No changes were made.")
+        console.print("\n[dim]Cancelled. No changes were made.[/]")
