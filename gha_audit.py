@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -131,6 +132,13 @@ def scan_repo(full_name: str, start: str, end: str) -> dict:
         info["error"] = "unavailable"
         return info
     info["workflows"] = wf.get("workflows", [])
+    for w in info["workflows"]:
+        raw = fetch_workflow_yaml(full_name, w.get("path", ""))
+        if raw:
+            w.update(analyze_workflow(full_name, raw))
+        else:
+            w.update({"trigger": "trigger unknown (file unreadable)",
+                      "tags": [], "effects": [], "secrets": []})
     recent = gh_json([f"repos/{full_name}/actions/runs?per_page=50"])
     if recent:
         info["runs_total"] = recent.get("total_count", info["runs_total"])
@@ -188,57 +196,106 @@ def disable_cmd(full_name: str, wf_id) -> str:
             f"repos/{full_name}/actions/workflows/{wf_id}/disable")
 
 
-def declared_trigger(full_name: str, wf_path: str) -> str:
-    """Read the workflow YAML and describe its `on:` trigger in words."""
-    raw = gh_text([
+# (needle-in-yaml, short tag for tables, human phrase for prompts)
+EFFECT_RULES = [
+    ("airtable", "airtable", "writes to Airtable"),
+    ("azure", "azure", "writes to Azure storage"),
+    ("wayback", "wayback", "submits pages to the Wayback Machine"),
+    ("deploy-pages", "pages", "deploys a GitHub Pages site"),
+    ("repository_dispatch", "repo-dispatch",
+     "triggers workflows in other repositories"),
+    ("twine", "pypi", "publishes to PyPI"),
+    ("npm publish", "npm", "publishes to npm"),
+    ("docker push", "containers", "pushes container images"),
+    ("ghcr.io", "containers", "pushes container images"),
+    ("slack", "slack", "sends Slack messages"),
+    ("sentry", "sentry", "reports errors to Sentry"),
+    ("gh-workflow-keepalive", "keepalive",
+     "auto re-enables its own schedule via the API"),
+    ("scrapy crawl", "web-scrape", "crawls external websites"),
+    (".deploy.sh", "web-scrape", "crawls external websites"),
+    ("git push", "repo-push", "pushes commits to this repo"),
+    ("git commit", "repo-commit", "creates commits in this repo"),
+    ("curl ", "http", "makes outbound HTTP calls"),
+    ("wget ", "http", "makes outbound HTTP calls"),
+]
+
+
+def fetch_workflow_yaml(full_name: str, wf_path: str) -> str | None:
+    return gh_text([
         "-H", "Accept: application/vnd.github.raw",
         f"repos/{full_name}/contents/{wf_path}",
     ])
-    if not raw:
-        return "trigger unknown (file unreadable)"
+
+
+def analyze_workflow(full_name: str, raw: str) -> dict:
+    """Describe a workflow's `on:` triggers and external effects."""
+    info = {"trigger": "trigger unknown", "tags": [], "effects": [],
+            "secrets": []}
     try:
         doc = yaml.safe_load(raw) or {}
     except yaml.YAMLError:
-        return "trigger unknown (unparseable yaml)"
+        doc = {}
+        info["trigger"] = "trigger unknown (unparseable yaml)"
     # YAML 1.1 parses the bare key `on:` as boolean True.
-    on = doc.get("on", doc.get(True))
-    if on is None:
-        return "trigger not declared"
-    if isinstance(on, str):
-        on = [on]
-    if isinstance(on, list):
-        on = {k: None for k in on}
-    parts = []
-    if "push" in on:
-        cfg = on.get("push") or {}
-        br = cfg.get("branches") if isinstance(cfg, dict) else None
-        parts.append(
-            "when code is pushed"
-            + (f" to {', '.join(map(str, br))}" if br else "")
-        )
-    if "pull_request" in on:
-        parts.append("when a pull request is opened/updated")
-    if "schedule" in on:
-        crons = [
-            c.get("cron") for c in (on.get("schedule") or [])
-            if isinstance(c, dict)
-        ]
-        parts.append(
-            "on a schedule (cron)"
-            + (f": {'; '.join(map(str, crons))}" if crons else "")
-        )
-    if "workflow_dispatch" in on:
-        parts.append("when run manually")
-    if "workflow_run" in on:
-        parts.append("after another workflow finishes")
-    if "release" in on:
-        parts.append("when a release is published")
-    known = {"push", "pull_request", "schedule", "workflow_dispatch",
-             "workflow_run", "release"}
-    for k in on:
-        if isinstance(k, str) and k not in known:
-            parts.append(f"on {k}")
-    return ", ".join(parts) or "trigger unknown"
+    on = doc.get("on", doc.get(True)) if doc else None
+    if on is None and doc:
+        info["trigger"] = "trigger not declared"
+    if on is not None:
+        if isinstance(on, str):
+            on = [on]
+        if isinstance(on, list):
+            on = {k: None for k in on}
+        parts = []
+        if "push" in on:
+            cfg = on.get("push") or {}
+            br = cfg.get("branches") if isinstance(cfg, dict) else None
+            parts.append(
+                "when code is pushed"
+                + (f" to {', '.join(map(str, br))}" if br else "")
+            )
+        if "pull_request" in on:
+            parts.append("when a pull request is opened/updated")
+        if "schedule" in on:
+            crons = [
+                c.get("cron") for c in (on.get("schedule") or [])
+                if isinstance(c, dict)
+            ]
+            parts.append(
+                "on a schedule (cron)"
+                + (f": {'; '.join(map(str, crons))}" if crons else "")
+            )
+        if "workflow_dispatch" in on:
+            parts.append("when run manually")
+        if "workflow_run" in on:
+            parts.append("after another workflow finishes")
+        if "release" in on:
+            parts.append("when a release is published")
+        known = {"push", "pull_request", "schedule", "workflow_dispatch",
+                 "workflow_run", "release"}
+        parts += [f"on {k}" for k in on
+                  if isinstance(k, str) and k not in known]
+        info["trigger"] = ", ".join(parts) or "trigger unknown"
+
+    lowered = raw.lower()
+    secrets = sorted(set(re.findall(r"secrets\.([A-Za-z0-9_]+)", raw)))
+    info["secrets"] = secrets
+    if secrets:
+        info["tags"].append("secrets")
+        info["effects"].append("uses secrets: " + ", ".join(secrets))
+    for needle, tag, phrase in EFFECT_RULES:
+        if needle in lowered and tag not in info["tags"]:
+            info["tags"].append(tag)
+            info["effects"].append(phrase)
+    owner = full_name.split("/", 1)[0].lower()
+    for m in re.finditer(r"uses:\s*([\w.\-]+)/([\w.\-]+)/", raw):
+        if m.group(1).lower() not in (owner, "actions"):
+            tag = "ext-call"
+            if tag not in info["tags"]:
+                info["tags"].append(tag)
+            info["effects"].append(
+                f"calls workflow in {m.group(1)}/{m.group(2)}")
+    return info
 
 
 def print_scan_table(rows: list[dict], meta: dict[str, dict],
@@ -260,6 +317,7 @@ def print_scan_table(rows: list[dict], meta: dict[str, dict],
     table.add_column("All time", justify="right")
     table.add_column(f"Last {WINDOW_DAYS}d", justify="right")
     table.add_column("Active workflows")
+    table.add_column("External effects")
     table.add_column("Branches seen")
     table.add_column("Events")
     for info in rows:
@@ -270,6 +328,7 @@ def print_scan_table(rows: list[dict], meta: dict[str, dict],
         wf_cell = ", ".join(active_names)
         if len(active_names) < len(wfs):
             wf_cell += f"  [dim]({len(active_names)}/{len(wfs)} active)[/]"
+        tags = sorted({t for w in wfs for t in w.get("tags", [])})
         branches = sorted({r.get("head_branch") for r in info["runs"]
                            if r.get("head_branch")})
         events = sorted({r.get("event") for r in info["runs"]
@@ -286,6 +345,8 @@ def print_scan_table(rows: list[dict], meta: dict[str, dict],
             str(info["runs_total"]),
             f"[{heat(n30)}]{n30}[/]",
             wf_cell or f"[dim]- ({len(wfs)} disabled)[/]",
+            "[yellow]" + ", ".join(tags) + "[/]" if tags
+            else "[dim]none[/]",
             ", ".join(branches[:6]) + (" ..." if len(branches) > 6 else ""),
             ", ".join(events),
             style="" if n30 else "dim",
@@ -309,6 +370,7 @@ def print_repo_detail(info: dict) -> None:
     table.add_column("Workflow", style="cyan")
     table.add_column("State", justify="center")
     table.add_column("File")
+    table.add_column("External effects")
     table.add_column("Events")
     table.add_column("Branches")
     table.add_column("Last run")
@@ -325,8 +387,10 @@ def print_repo_detail(info: dict) -> None:
         mins_cell = (
             f"[{heat(int(mins))}]{mins:.1f}[/]" if mins is not None else "-"
         )
+        effects = "; ".join(w.get("effects", [])) or "[dim]none detected[/]"
         table.add_row(
             w["name"], colored, w["path"].split("/")[-1],
+            effects,
             ", ".join(act["events"]) or "[dim]none seen[/]",
             ", ".join(act["branches"]) or "[dim]none seen[/]",
             act["last"] or "[dim]none seen[/]",
@@ -529,11 +593,15 @@ def main() -> None:
         ]
         for w in active_wfs:
             act = wf_activity(info, w["id"])
-            trig = declared_trigger(full_name, w["path"])
+            trig = w.get("trigger", "trigger unknown")
+            side_effects = (
+                "; ".join(w.get("effects", []))
+                or "no external effects detected"
+            )
             observed = (
                 f"runs: {disable_cmd(full_name, w['id'])} | "
                 f"stops only this workflow (shows disabled in the "
-                f"Actions tab) | last ran "
+                f"Actions tab) | effects: {side_effects} | last ran "
                 f"{act['last'] or 'never in recent sample'} | "
                 f"branches seen: {', '.join(act['branches']) or 'none'}"
             )

@@ -23,7 +23,10 @@ uv run gha_audit.py --scan-only     # read-only table, no prompts
 
 1. Scans every repo and prints a table with: **All time** run count,
    **Last 30d** run count (via the API `created=START..END` filter),
-   active workflow **names** (CI, Cron, Staging, ...), and the
+   active workflow **names** (CI, Cron, Staging, ...), an
+   **External effects** column summarizing what each repo's workflows can
+   touch outside GitHub (Airtable, Azure, Wayback, repo commits, secrets,
+   external reusable workflows, outbound HTTP, ...), and the
    branches/events seen in the 50 most recent runs.
 2. You checkbox-select repos to inspect.
 3. Per repo: a detail table shows each workflow's state, trigger events,
