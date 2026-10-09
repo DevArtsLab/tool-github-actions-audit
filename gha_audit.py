@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["questionary>=2.1", "rich>=13.7"]
+# dependencies = ["questionary>=2.1", "rich>=13.7", "pyyaml>=6.0"]
 # ///
 """gha_audit: interactive GitHub Actions usage auditor.
 
@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 
 import questionary
+import yaml
 from questionary import Choice, Style
 from rich import box
 from rich.console import Console
@@ -49,6 +50,7 @@ from rich.tree import Tree
 
 console = Console(width=max(140, shutil.get_terminal_size().columns))
 ALL_ACTIONS = "__disable_entire_repo__"
+CANCEL = "__cancel__"
 WINDOW_DAYS = 30
 
 QSTYLE = Style(
@@ -171,6 +173,65 @@ def repo_actions_enabled(full_name: str) -> bool | None:
     return p.get("enabled") if p else None
 
 
+def gh_text(args: list[str]) -> str | None:
+    """Run `gh api <args>`; return raw stdout or None on failure."""
+    proc = subprocess.run(["gh", "api", *args], capture_output=True, text=True)
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def declared_trigger(full_name: str, wf_path: str) -> str:
+    """Read the workflow YAML and describe its `on:` trigger in words."""
+    raw = gh_text([
+        "-H", "Accept: application/vnd.github.raw",
+        f"repos/{full_name}/contents/{wf_path}",
+    ])
+    if not raw:
+        return "trigger unknown (file unreadable)"
+    try:
+        doc = yaml.safe_load(raw) or {}
+    except yaml.YAMLError:
+        return "trigger unknown (unparseable yaml)"
+    # YAML 1.1 parses the bare key `on:` as boolean True.
+    on = doc.get("on", doc.get(True))
+    if on is None:
+        return "trigger not declared"
+    if isinstance(on, str):
+        on = [on]
+    if isinstance(on, list):
+        on = {k: None for k in on}
+    parts = []
+    if "push" in on:
+        cfg = on.get("push") or {}
+        br = cfg.get("branches") if isinstance(cfg, dict) else None
+        parts.append(
+            "when code is pushed"
+            + (f" to {', '.join(map(str, br))}" if br else "")
+        )
+    if "pull_request" in on:
+        parts.append("when a pull request is opened/updated")
+    if "schedule" in on:
+        crons = [
+            c.get("cron") for c in (on.get("schedule") or [])
+            if isinstance(c, dict)
+        ]
+        parts.append(
+            "on a schedule (cron)"
+            + (f": {'; '.join(map(str, crons))}" if crons else "")
+        )
+    if "workflow_dispatch" in on:
+        parts.append("when run manually")
+    if "workflow_run" in on:
+        parts.append("after another workflow finishes")
+    if "release" in on:
+        parts.append("when a release is published")
+    known = {"push", "pull_request", "schedule", "workflow_dispatch",
+             "workflow_run", "release"}
+    for k in on:
+        if isinstance(k, str) and k not in known:
+            parts.append(f"on {k}")
+    return ", ".join(parts) or "trigger unknown"
+
+
 def print_scan_table(rows: list[dict], meta: dict[str, dict],
                      start: str, end: str) -> None:
     table = Table(
@@ -257,9 +318,9 @@ def print_repo_detail(info: dict) -> None:
         )
         table.add_row(
             w["name"], colored, w["path"].split("/")[-1],
-            ", ".join(act["events"]) or "-",
-            ", ".join(act["branches"]) or "-",
-            act["last"] or "-",
+            ", ".join(act["events"]) or "[dim]none seen[/]",
+            ", ".join(act["branches"]) or "[dim]none seen[/]",
+            act["last"] or "[dim]none seen[/]",
             mins_cell,
         )
     console.print(
@@ -440,23 +501,40 @@ def main() -> None:
     for full_name in selected:
         info = scanned[full_name]
         print_repo_detail(info)
+        active_wfs = [w for w in info["workflows"]
+                      if w.get("state") == "active"]
+        # "Disable all" first, CI-style workflow last, then Cancel.
+        active_wfs.sort(key=lambda w: w["name"] == "CI")
         wf_choices = [
             Choice(
-                title=(
-                    f"{w['name']}  [{w['state']}]  "
-                    f"{w['path'].split('/')[-1]}  "
-                    f"events={','.join(wf_activity(info, w['id'])['events']) or '-'}  "
-                    f"branches={','.join(wf_activity(info, w['id'])['branches']) or '-'}"
+                title="!! Disable ALL GitHub Actions on this repo",
+                description=(
+                    "repo-wide kill switch; blocks every workflow, "
+                    "including any that arrive later via syncs"
                 ),
-                value=w["id"],
+                value=ALL_ACTIONS,
             )
-            for w in info["workflows"]
-            if w.get("state") == "active"
         ]
+        for w in active_wfs:
+            act = wf_activity(info, w["id"])
+            trig = declared_trigger(full_name, w["path"])
+            observed = (
+                f"file {w['path'].split('/')[-1]} | last ran "
+                f"{act['last'] or 'never in recent sample'} | "
+                f"branches seen: {', '.join(act['branches']) or 'none'}"
+            )
+            wf_choices.append(
+                Choice(
+                    title=f"{w['name']}  |  runs {trig}",
+                    description=observed,
+                    value=w["id"],
+                )
+            )
         wf_choices.append(
             Choice(
-                title="!! Disable ALL GitHub Actions on this repo",
-                value=ALL_ACTIONS,
+                title="Cancel - quit without changes",
+                description="exit now; nothing is modified",
+                value=CANCEL,
             )
         )
         picked = questionary.checkbox(
@@ -467,7 +545,7 @@ def main() -> None:
                         "enter on empty = skip this repo, "
                         "ctrl+c = cancel all",
         ).ask()
-        if picked is None:
+        if picked is None or CANCEL in picked:
             console.print("[dim]Cancelled. No changes were made.[/]")
             return
         if not picked:
