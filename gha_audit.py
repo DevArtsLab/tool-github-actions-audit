@@ -303,11 +303,16 @@ def main() -> None:
         for i in rows
     ]
     selected = questionary.checkbox(
-        "Select repositories to inspect/manage (space to check):",
+        "Select repositories to inspect/manage:",
         choices=choices,
+        instruction="space = check, enter = continue, "
+                    "enter on empty = exit, ctrl+c = cancel",
     ).ask()
+    if selected is None:
+        console.print("Cancelled. No changes were made.")
+        return
     if not selected:
-        console.print("No repositories selected. Done.")
+        console.print("No repositories selected. Done, nothing changed.")
         return
 
     plan: list[tuple[str, str, int | None]] = []
@@ -334,13 +339,18 @@ def main() -> None:
             )
         )
         picked = questionary.checkbox(
-            f"{full_name}: select workflows to DISABLE (space to check, "
-            f"empty = no change):",
+            f"{full_name}: select workflows to DISABLE:",
             choices=wf_choices,
+            instruction="space = check, enter = next repo, "
+                        "enter on empty = skip this repo, "
+                        "ctrl+c = cancel all",
         ).ask()
         if picked is None:
-            console.print("Cancelled.")
+            console.print("Cancelled. No changes were made.")
             return
+        if not picked:
+            console.print(f"Skipped {full_name}, no changes.")
+            continue
         for pid in picked:
             label = ("disable entire repo Actions"
                      if pid == ALL_ACTIONS
@@ -350,10 +360,13 @@ def main() -> None:
             plan.append((full_name, label, pid))
 
     if not plan:
-        console.print("Nothing selected to disable. Done.")
+        console.print("Nothing selected to disable. Done, nothing changed.")
         return
     confirm_and_execute(plan)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        console.print("\nCancelled. No changes were made.")
