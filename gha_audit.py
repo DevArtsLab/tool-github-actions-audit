@@ -105,8 +105,14 @@ def authed_login() -> str | None:
 def list_repos(owner: str) -> list[dict]:
     proc = subprocess.run(
         [
-            "gh", "repo", "list", owner, "--limit", "1000",
-            "--json", "nameWithOwner,name,isFork,isPrivate",
+            "gh",
+            "repo",
+            "list",
+            owner,
+            "--limit",
+            "1000",
+            "--json",
+            "nameWithOwner,name,isFork,isPrivate",
         ],
         capture_output=True,
         text=True,
@@ -137,15 +143,19 @@ def scan_repo(full_name: str, start: str, end: str) -> dict:
         if raw:
             w.update(analyze_workflow(full_name, raw))
         else:
-            w.update({"trigger": "trigger unknown (file unreadable)",
-                      "tags": [], "effects": [], "secrets": []})
+            w.update(
+                {
+                    "trigger": "trigger unknown (file unreadable)",
+                    "tags": [],
+                    "effects": [],
+                    "secrets": [],
+                }
+            )
     recent = gh_json([f"repos/{full_name}/actions/runs?per_page=50"])
     if recent:
         info["runs_total"] = recent.get("total_count", info["runs_total"])
         info["runs"] = recent.get("workflow_runs", [])
-    win = gh_json(
-        [f"repos/{full_name}/actions/runs?per_page=1&created={start}..{end}"]
-    )
+    win = gh_json([f"repos/{full_name}/actions/runs?per_page=1&created={start}..{end}"])
     if win:
         info["runs_30d"] = win.get("total_count", 0)
     return info
@@ -164,8 +174,7 @@ def wf_activity(info: dict, wf_id: int) -> dict:
             ts = r.get("created_at", "")
             if ts > last:
                 last = ts
-    return {"branches": sorted(branches), "events": sorted(events),
-            "last": last[:10]}
+    return {"branches": sorted(branches), "events": sorted(events), "last": last[:10]}
 
 
 def billable_minutes(full_name: str, wf_id: int) -> float | None:
@@ -190,10 +199,10 @@ def gh_text(args: list[str]) -> str | None:
 def disable_cmd(full_name: str, wf_id) -> str:
     """The literal gh command used for a given disable action."""
     if wf_id == ALL_ACTIONS:
-        return (f"gh api -X PUT repos/{full_name}/actions/permissions "
-                f"-F enabled=false")
-    return (f"gh api -X PUT "
-            f"repos/{full_name}/actions/workflows/{wf_id}/disable")
+        return (
+            f"gh api -X PUT repos/{full_name}/actions/permissions " f"-F enabled=false"
+        )
+    return f"gh api -X PUT " f"repos/{full_name}/actions/workflows/{wf_id}/disable"
 
 
 # (needle-in-yaml, short tag for tables, human phrase for prompts)
@@ -202,16 +211,22 @@ EFFECT_RULES = [
     ("azure", "azure", "writes to Azure storage"),
     ("wayback", "wayback", "submits pages to the Wayback Machine"),
     ("deploy-pages", "pages", "deploys a GitHub Pages site"),
-    ("repository_dispatch", "repo-dispatch",
-     "triggers workflows in other repositories"),
+    (
+        "repository_dispatch",
+        "repo-dispatch",
+        "triggers workflows in other repositories",
+    ),
     ("twine", "pypi", "publishes to PyPI"),
     ("npm publish", "npm", "publishes to npm"),
     ("docker push", "containers", "pushes container images"),
     ("ghcr.io", "containers", "pushes container images"),
     ("slack", "slack", "sends Slack messages"),
     ("sentry", "sentry", "reports errors to Sentry"),
-    ("gh-workflow-keepalive", "keepalive",
-     "auto re-enables its own schedule via the API"),
+    (
+        "gh-workflow-keepalive",
+        "keepalive",
+        "auto re-enables its own schedule via the API",
+    ),
     ("scrapy crawl", "web-scrape", "crawls external websites"),
     (".deploy.sh", "web-scrape", "crawls external websites"),
     ("git push", "repo-push", "pushes commits to this repo"),
@@ -222,16 +237,18 @@ EFFECT_RULES = [
 
 
 def fetch_workflow_yaml(full_name: str, wf_path: str) -> str | None:
-    return gh_text([
-        "-H", "Accept: application/vnd.github.raw",
-        f"repos/{full_name}/contents/{wf_path}",
-    ])
+    return gh_text(
+        [
+            "-H",
+            "Accept: application/vnd.github.raw",
+            f"repos/{full_name}/contents/{wf_path}",
+        ]
+    )
 
 
 def analyze_workflow(full_name: str, raw: str) -> dict:
     """Describe a workflow's `on:` triggers and external effects."""
-    info = {"trigger": "trigger unknown", "tags": [], "effects": [],
-            "secrets": []}
+    info = {"trigger": "trigger unknown", "tags": [], "effects": [], "secrets": []}
     try:
         doc = yaml.safe_load(raw) or {}
     except yaml.YAMLError:
@@ -251,15 +268,13 @@ def analyze_workflow(full_name: str, raw: str) -> dict:
             cfg = on.get("push") or {}
             br = cfg.get("branches") if isinstance(cfg, dict) else None
             parts.append(
-                "when code is pushed"
-                + (f" to {', '.join(map(str, br))}" if br else "")
+                "when code is pushed" + (f" to {', '.join(map(str, br))}" if br else "")
             )
         if "pull_request" in on:
             parts.append("when a pull request is opened/updated")
         if "schedule" in on:
             crons = [
-                c.get("cron") for c in (on.get("schedule") or [])
-                if isinstance(c, dict)
+                c.get("cron") for c in (on.get("schedule") or []) if isinstance(c, dict)
             ]
             parts.append(
                 "on a schedule (cron)"
@@ -271,10 +286,15 @@ def analyze_workflow(full_name: str, raw: str) -> dict:
             parts.append("after another workflow finishes")
         if "release" in on:
             parts.append("when a release is published")
-        known = {"push", "pull_request", "schedule", "workflow_dispatch",
-                 "workflow_run", "release"}
-        parts += [f"on {k}" for k in on
-                  if isinstance(k, str) and k not in known]
+        known = {
+            "push",
+            "pull_request",
+            "schedule",
+            "workflow_dispatch",
+            "workflow_run",
+            "release",
+        }
+        parts += [f"on {k}" for k in on if isinstance(k, str) and k not in known]
         info["trigger"] = ", ".join(parts) or "trigger unknown"
 
     lowered = raw.lower()
@@ -293,13 +313,13 @@ def analyze_workflow(full_name: str, raw: str) -> dict:
             tag = "ext-call"
             if tag not in info["tags"]:
                 info["tags"].append(tag)
-            info["effects"].append(
-                f"calls workflow in {m.group(1)}/{m.group(2)}")
+            info["effects"].append(f"calls workflow in {m.group(1)}/{m.group(2)}")
     return info
 
 
-def print_scan_table(rows: list[dict], meta: dict[str, dict],
-                     start: str, end: str) -> None:
+def print_scan_table(
+    rows: list[dict], meta: dict[str, dict], start: str, end: str
+) -> None:
     table = Table(
         title="GitHub Actions usage by repository",
         caption=(
@@ -323,16 +343,15 @@ def print_scan_table(rows: list[dict], meta: dict[str, dict],
     for info in rows:
         m = meta[info["full_name"]]
         wfs = info["workflows"]
-        active_names = [w["name"] for w in wfs
-                        if w.get("state") == "active"]
+        active_names = [w["name"] for w in wfs if w.get("state") == "active"]
         wf_cell = ", ".join(active_names)
         if len(active_names) < len(wfs):
             wf_cell += f"  [dim]({len(active_names)}/{len(wfs)} active)[/]"
         tags = sorted({t for w in wfs for t in w.get("tags", [])})
-        branches = sorted({r.get("head_branch") for r in info["runs"]
-                           if r.get("head_branch")})
-        events = sorted({r.get("event") for r in info["runs"]
-                         if r.get("event")})
+        branches = sorted(
+            {r.get("head_branch") for r in info["runs"] if r.get("head_branch")}
+        )
+        events = sorted({r.get("event") for r in info["runs"] if r.get("event")})
         if m["isFork"]:
             kind = "[magenta]fork[/]"
         else:
@@ -341,12 +360,12 @@ def print_scan_table(rows: list[dict], meta: dict[str, dict],
             kind += "[dim]/priv[/]"
         n30 = info["runs_30d"]
         table.add_row(
-            info["full_name"].split("/", 1)[-1], kind,
+            info["full_name"].split("/", 1)[-1],
+            kind,
             str(info["runs_total"]),
             f"[{heat(n30)}]{n30}[/]",
             wf_cell or f"[dim]- ({len(wfs)} disabled)[/]",
-            "[yellow]" + ", ".join(tags) + "[/]" if tags
-            else "[dim]none[/]",
+            "[yellow]" + ", ".join(tags) + "[/]" if tags else "[dim]none[/]",
             ", ".join(branches[:6]) + (" ..." if len(branches) > 6 else ""),
             ", ".join(events),
             style="" if n30 else "dim",
@@ -357,9 +376,9 @@ def print_scan_table(rows: list[dict], meta: dict[str, dict],
 def print_repo_detail(info: dict) -> None:
     enabled = repo_actions_enabled(info["full_name"])
     status = (
-        "[green]enabled[/]" if enabled
-        else "[red]disabled[/]" if enabled is False
-        else "[dim]unknown[/]"
+        "[green]enabled[/]"
+        if enabled
+        else "[red]disabled[/]" if enabled is False else "[dim]unknown[/]"
     )
     table = Table(
         box=box.ROUNDED,
@@ -385,12 +404,13 @@ def print_repo_detail(info: dict) -> None:
             "disabled_inactivity": f"[red]{state}[/]",
         }.get(state, state)
         mins_cell = (
-            f"[{heat(int(mins))}]{mins:.1f}[/]" if mins is not None
-            else "[dim]n/a[/]"
+            f"[{heat(int(mins))}]{mins:.1f}[/]" if mins is not None else "[dim]n/a[/]"
         )
         effects = "; ".join(w.get("effects", [])) or "[dim]none detected[/]"
         table.add_row(
-            w["name"], colored, w["path"].split("/")[-1],
+            w["name"],
+            colored,
+            w["path"].split("/")[-1],
             effects,
             ", ".join(act["events"]) or "[dim]none seen[/]",
             ", ".join(act["branches"]) or "[dim]none seen[/]",
@@ -452,19 +472,27 @@ def confirm_and_execute(
     results.add_column("Status", justify="center")
     for repo, label, wf_id in plan:
         if wf_id == ALL_ACTIONS:
-            err = gh_write([
-                "-X", "PUT", f"repos/{repo}/actions/permissions",
-                "-F", "enabled=false",
-            ])
+            err = gh_write(
+                [
+                    "-X",
+                    "PUT",
+                    f"repos/{repo}/actions/permissions",
+                    "-F",
+                    "enabled=false",
+                ]
+            )
         else:
-            err = gh_write([
-                "-X", "PUT",
-                f"repos/{repo}/actions/workflows/{wf_id}/disable",
-            ])
+            err = gh_write(
+                [
+                    "-X",
+                    "PUT",
+                    f"repos/{repo}/actions/workflows/{wf_id}/disable",
+                ]
+            )
         results.add_row(
-            repo, label,
-            "[bold green]done[/]" if err is None
-            else f"[bold red]failed: {err}[/]",
+            repo,
+            label,
+            "[bold green]done[/]" if err is None else f"[bold red]failed: {err}[/]",
         )
     console.print(results)
     return set(by_repo)
@@ -472,18 +500,25 @@ def confirm_and_execute(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Interactive GitHub Actions auditor")
-    ap.add_argument("--owner", help="GitHub user or org to audit "
-                                    "(default: authenticated account)")
-    ap.add_argument("--forks-only", action="store_true",
-                    help="only scan forked repositories")
-    ap.add_argument("--scan-only", action="store_true",
-                    help="print the audit table and exit (read-only)")
+    ap.add_argument(
+        "--owner",
+        help="GitHub user or org to audit " "(default: authenticated account)",
+    )
+    ap.add_argument(
+        "--forks-only", action="store_true", help="only scan forked repositories"
+    )
+    ap.add_argument(
+        "--scan-only",
+        action="store_true",
+        help="print the audit table and exit (read-only)",
+    )
     args = ap.parse_args()
 
     owner = args.owner or authed_login()
     if not owner:
         owner = questionary.text(
-            "GitHub owner (user or org) to audit:", style=QSTYLE).ask()
+            "GitHub owner (user or org) to audit:", style=QSTYLE
+        ).ask()
         if not owner:
             sys.exit("No owner given.")
 
@@ -501,8 +536,7 @@ def main() -> None:
 
     repos = list_repos(owner)
     meta = {r["nameWithOwner"]: r for r in repos}
-    names = [r["nameWithOwner"] for r in repos
-             if not args.forks_only or r["isFork"]]
+    names = [r["nameWithOwner"] for r in repos if not args.forks_only or r["isFork"]]
 
     scanned: dict[str, dict] = {}
     with Progress(
@@ -514,19 +548,18 @@ def main() -> None:
     ) as progress:
         task = progress.add_task("Scanning repos", total=len(names))
         with ThreadPoolExecutor(max_workers=8) as ex:
-            futures = {ex.submit(scan_repo, n, start, end): n
-                       for n in names}
+            futures = {ex.submit(scan_repo, n, start, end): n for n in names}
             for fut in as_completed(futures):
                 info = fut.result()
                 scanned[info["full_name"]] = info
                 progress.update(
-                    task, advance=1,
+                    task,
+                    advance=1,
                     description=f"Scanned {info['full_name'].split('/')[-1]}",
                 )
 
     rows = sorted(
-        (i for i in scanned.values()
-         if i["runs_total"] or i["workflows"]),
+        (i for i in scanned.values() if i["runs_total"] or i["workflows"]),
         key=lambda i: (-i["runs_30d"], -i["runs_total"]),
     )
     if not rows:
@@ -554,7 +587,9 @@ def main() -> None:
                 f"{i['full_name']}  "
                 f"[{'fork' if meta[i['full_name']]['isFork'] else 'own'}] "
                 f"30d={i['runs_30d']} all={i['runs_total']} "
-                f"active={sum(1 for w in i['workflows'] if w['state'] == 'active')}/{len(i['workflows'])}"
+                f"active="
+                f"{sum(1 for w in i['workflows'] if w['state'] == 'active')}"
+                f"/{len(i['workflows'])}"
             ),
             value=i["full_name"],
         )
@@ -567,7 +602,7 @@ def main() -> None:
             choices=choices,
             style=QSTYLE,
             instruction="space = check, enter = continue, "
-                        "enter on empty = exit, ctrl+c = cancel",
+            "enter on empty = exit, ctrl+c = cancel",
         ).ask()
         if not selected:
             console.print("[dim]Done. Nothing else selected.[/]")
@@ -578,20 +613,18 @@ def main() -> None:
         for full_name in selected:
             if full_name in dirty:
                 console.print(
-                    f"[dim]Refreshing {full_name} after earlier "
-                    f"changes...[/]"
+                    f"[dim]Refreshing {full_name} after earlier " f"changes...[/]"
                 )
                 scanned[full_name] = scan_repo(full_name, start, end)
             info = scanned[full_name]
             print_repo_detail(info)
-            active_wfs = [w for w in info["workflows"]
-                          if w.get("state") == "active"]
+            active_wfs = [w for w in info["workflows"] if w.get("state") == "active"]
             # "Disable all" first, CI-style workflow last, then Cancel.
             active_wfs.sort(key=lambda w: w["name"] == "CI")
             wf_choices = [
                 Choice(
                     title="STOP everything - disable ALL GitHub Actions "
-                          "on this repo",
+                    "on this repo",
                     description=(
                         f"runs: {disable_cmd(full_name, ALL_ACTIONS)} | "
                         f"turns off the Actions feature repo-wide (the "
@@ -605,8 +638,7 @@ def main() -> None:
                 act = wf_activity(info, w["id"])
                 trig = w.get("trigger", "trigger unknown")
                 side_effects = (
-                    "; ".join(w.get("effects", []))
-                    or "no external effects detected"
+                    "; ".join(w.get("effects", [])) or "no external effects detected"
                 )
                 observed = (
                     f"runs: {disable_cmd(full_name, w['id'])} | "
@@ -617,8 +649,7 @@ def main() -> None:
                 )
                 wf_choices.append(
                     Choice(
-                        title=(f"DISABLE '{w['name']}'  |  "
-                               f"currently runs {trig}"),
+                        title=(f"DISABLE '{w['name']}'  |  " f"currently runs {trig}"),
                         description=observed,
                         value=w["id"],
                     )
@@ -640,8 +671,8 @@ def main() -> None:
                 choices=wf_choices,
                 style=QSTYLE,
                 instruction="space = check, enter = next repo, "
-                            "enter on empty = skip this repo, "
-                            "ctrl+c = cancel all",
+                "enter on empty = skip this repo, "
+                "ctrl+c = cancel all",
             ).ask()
             if picked is None or CANCEL in picked:
                 cancelled = True
@@ -650,11 +681,12 @@ def main() -> None:
                 console.print(f"[dim]Skipped {full_name}, no changes.[/]")
                 continue
             for pid in picked:
-                label = ("disable entire repo Actions"
-                         if pid == ALL_ACTIONS
-                         else "disable workflow "
-                              + next(w["name"] for w in info["workflows"]
-                                     if w["id"] == pid))
+                label = (
+                    "disable entire repo Actions"
+                    if pid == ALL_ACTIONS
+                    else "disable workflow "
+                    + next(w["name"] for w in info["workflows"] if w["id"] == pid)
+                )
                 plan.append((full_name, label, pid))
 
         if plan:
@@ -668,8 +700,7 @@ def main() -> None:
             "Manage more repositories?",
             default=False,
             style=QSTYLE,
-            instruction="y + Enter = back to repo list, "
-                        "n + Enter or ctrl+c = exit",
+            instruction="y + Enter = back to repo list, " "n + Enter or ctrl+c = exit",
         ).ask()
         if not again:
             console.print("[dim]Done.[/]")
