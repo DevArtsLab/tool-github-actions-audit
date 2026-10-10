@@ -119,6 +119,7 @@ class TestMarkupInjection:
             ],
             "error": None,
             "errors": [],
+            "actions_enabled": False,
         }
 
     def test_scan_table_renders_evil_input(self, monkeypatch):
@@ -189,13 +190,40 @@ class TestSilentApiFailures:
         monkeypatch.setattr(ga, "fetch_workflow_yaml", lambda *a: "on: push")
         info = ga.scan_repo("o/r", "2026-01-01", "2026-02-01")
         assert info["error"] is None
-        assert len(info["errors"]) == 2  # both failed calls recorded
+        # permissions + recent runs + 30d window all recorded
+        assert len(info["errors"]) == 3
 
     def test_scan_repo_fatal_failure(self, monkeypatch):
         monkeypatch.setattr(ga, "gh_json", lambda a: (None, "HTTP 500"))
         info = ga.scan_repo("o/r", "s", "e")
         assert info["error"]
         assert "500" in info["error"]
+
+    def test_scan_repo_records_actions_gate(self, monkeypatch):
+        def fake_gh(args):
+            if "permissions" in args[0]:
+                return {"enabled": False}, None
+            if "workflows" in args[0]:
+                return {"total_count": 0, "workflows": []}, None
+            return {"total_count": 0, "workflow_runs": []}, None
+
+        monkeypatch.setattr(ga, "gh_json", fake_gh)
+        monkeypatch.setattr(ga, "fetch_workflow_yaml", lambda *a: None)
+        info = ga.scan_repo("o/r", "s", "e")
+        assert info["actions_enabled"] is False
+        assert info["errors"] == []
+
+    def test_scan_repo_gate_failure_recorded(self, monkeypatch):
+        def fake_gh(args):
+            if "permissions" in args[0]:
+                return None, "HTTP 403"
+            return {"total_count": 0, "workflows": []}, None
+
+        monkeypatch.setattr(ga, "gh_json", fake_gh)
+        monkeypatch.setattr(ga, "fetch_workflow_yaml", lambda *a: None)
+        info = ga.scan_repo("o/r", "s", "e")
+        assert info["actions_enabled"] is None
+        assert any("permissions" in e for e in info["errors"])
 
 
 class TestOwnerValidation:

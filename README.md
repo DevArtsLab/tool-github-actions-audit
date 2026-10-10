@@ -23,7 +23,10 @@ uv run gha_audit.py --scan-only     # read-only table, no prompts
 
 ## Flow
 
-1. Scans every repo and prints a table with: **All time** run count,
+1. Scans every repo and prints a table with: the repo-wide **Actions**
+   gate (`OFF` = hard gate: no run of any type can start - schedules,
+   pushes, manual dispatch, or anything synced in later - and gated rows
+   are dimmed), **All time** run count,
    **Last 30d** run count (via the API `created=START..END` filter),
    active workflow **names** (CI, Cron, Staging, ...), an
    **External effects** column summarizing what each repo's workflows can

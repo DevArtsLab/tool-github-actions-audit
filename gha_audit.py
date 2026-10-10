@@ -155,7 +155,13 @@ def scan_repo(full_name: str, start: str, end: str) -> dict:
         "runs": [],
         "error": None,
         "errors": [],
+        "actions_enabled": None,
     }
+    perms, err = gh_json([f"repos/{full_name}/actions/permissions"])
+    if err:
+        info["errors"].append(f"actions permissions failed: {err}")
+    else:
+        info["actions_enabled"] = perms.get("enabled")
     wf, err = gh_json([f"repos/{full_name}/actions/workflows?per_page=100"])
     if err:
         info["error"] = f"workflows list failed: {err}"
@@ -385,7 +391,9 @@ def print_scan_table(
         caption=(
             f"All time = total workflow runs ever. Last {WINDOW_DAYS}d = "
             f"runs {start} .. {end}. Branches/Events sampled from the 50 "
-            f"most recent runs. External effects are best-effort keyword "
+            f"most recent runs. Actions = the repo-wide gate: OFF blocks "
+            f"every run type (schedule, push, manual) and any workflow "
+            f"synced in later. External effects are best-effort keyword "
             f"heuristics, not an authoritative audit."
         ),
         box=box.ROUNDED,
@@ -395,6 +403,7 @@ def print_scan_table(
     )
     table.add_column("Repo", style="cyan", no_wrap=True)
     table.add_column("Kind", justify="center")
+    table.add_column("Actions", justify="center")
     table.add_column("All time", justify="right")
     table.add_column(f"Last {WINDOW_DAYS}d", justify="right")
     table.add_column("Active workflows")
@@ -420,9 +429,14 @@ def print_scan_table(
         if m["isPrivate"]:
             kind += "[dim]/priv[/]"
         n30 = info["runs_30d"]
+        gate = info.get("actions_enabled")
+        gate_cell = (
+            "[red]OFF[/]" if gate is False else "[green]on[/]" if gate else "[dim]?[/]"
+        )
         table.add_row(
             disp(info["full_name"].split("/", 1)[-1]),
             kind,
+            gate_cell,
             str(info["runs_total"]),
             f"[{heat(n30)}]{n30}[/]",
             wf_cell or f"[dim]- ({len(wfs)} disabled)[/]",
@@ -430,17 +444,27 @@ def print_scan_table(
             ", ".join(disp(b) for b in branches[:6])
             + (" ..." if len(branches) > 6 else ""),
             ", ".join(disp(e) for e in events),
-            style="" if n30 else "dim",
+            style="" if (n30 and gate is not False) else "dim",
         )
     console.print(table)
 
 
 def print_repo_detail(info: dict) -> None:
-    enabled = repo_actions_enabled(info["full_name"])
+    enabled = info.get("actions_enabled")
+    if enabled is None:
+        enabled = repo_actions_enabled(info["full_name"])
     status = (
         "[green]enabled[/]"
         if enabled
-        else "[red]disabled[/]" if enabled is False else "[dim]unknown[/]"
+        else (
+            (
+                "[red]DISABLED - hard gate:[/] no run can start "
+                "[dim](schedule, push, manual, or newly synced "
+                "workflows)[/]"
+            )
+            if enabled is False
+            else "[dim]unknown[/]"
+        )
     )
     table = Table(
         box=box.ROUNDED,
@@ -645,6 +669,7 @@ def main() -> None:
                         "runs": [],
                         "error": f"scan crashed: {type(e).__name__}: {e}",
                         "errors": [],
+                        "actions_enabled": None,
                     }
                 scanned[info["full_name"]] = info
                 progress.update(
@@ -662,12 +687,14 @@ def main() -> None:
         return
 
     forks = sum(1 for i in rows if meta[i["full_name"]]["isFork"])
+    gates_off = sum(1 for i in scanned.values() if i.get("actions_enabled") is False)
     console.print(
         Panel.fit(
             f"scanned: [bold]{len(names)}[/]  |  with Actions activity: "
             f"[bold]{len(rows)}[/]  |  forks: [bold]{forks}[/]  |  "
             f"runs last {WINDOW_DAYS}d: "
-            f"[bold]{sum(i['runs_30d'] for i in rows)}[/]",
+            f"[bold]{sum(i['runs_30d'] for i in rows)}[/]  |  "
+            f"repo Actions OFF: [bold red]{gates_off}[/]",
             border_style="blue",
         )
     )
@@ -739,9 +766,10 @@ def main() -> None:
                     "on this repo",
                     description=(
                         f"runs: {disable_cmd(full_name, ALL_ACTIONS)} | "
-                        f"turns off the Actions feature repo-wide (the "
-                        f"Actions tab shows 'disabled'); per-workflow "
-                        f"states are kept and return if re-enabled"
+                        f"repo-wide hard gate: blocks every run type "
+                        f"(schedule, push, manual) plus any workflow "
+                        f"synced in later; per-workflow states are kept "
+                        f"and return if re-enabled"
                     ),
                     value=ALL_ACTIONS,
                 )
@@ -779,9 +807,15 @@ def main() -> None:
                     value=CANCEL,
                 )
             )
+            gate_off = info.get("actions_enabled") is False
             picked = questionary.checkbox(
                 f"{sanitize(full_name)}: select workflows to STOP "
-                f"(nothing here runs workflows, it only disables them):",
+                + (
+                    "(repo-wide Actions is OFF - nothing can run here; "
+                    "per-workflow disables still apply if re-enabled):"
+                    if gate_off
+                    else "(nothing here runs workflows, " "it only disables them):"
+                ),
                 choices=wf_choices,
                 style=QSTYLE,
                 instruction="space = check, enter = next repo, "
