@@ -385,7 +385,8 @@ def print_repo_detail(info: dict) -> None:
             "disabled_inactivity": f"[red]{state}[/]",
         }.get(state, state)
         mins_cell = (
-            f"[{heat(int(mins))}]{mins:.1f}[/]" if mins is not None else "-"
+            f"[{heat(int(mins))}]{mins:.1f}[/]" if mins is not None
+            else "[dim]n/a[/]"
         )
         effects = "; ".join(w.get("effects", [])) or "[dim]none detected[/]"
         table.add_row(
@@ -407,7 +408,7 @@ def print_repo_detail(info: dict) -> None:
 
 
 def confirm_and_execute(
-    plan: list[tuple[str, str, int | None]],
+    plan: list[tuple[str, str, int | str]],
 ) -> set[str]:
     """plan entries: (repo_full_name, label, workflow_id|ALL_ACTIONS).
     Returns the set of repos actually modified (empty if aborted)."""
@@ -572,7 +573,7 @@ def main() -> None:
             console.print("[dim]Done. Nothing else selected.[/]")
             return
 
-        plan: list[tuple[str, str, int | None]] = []
+        plan: list[tuple[str, str, int | str]] = []
         cancelled = False
         for full_name in selected:
             if full_name in dirty:
@@ -625,7 +626,11 @@ def main() -> None:
             wf_choices.append(
                 Choice(
                     title="Cancel - quit without changes",
-                    description="exit now; nothing is modified",
+                    description=(
+                        "exit the picker; picks already queued from "
+                        "earlier repos are still shown for confirmation, "
+                        "never applied silently"
+                    ),
                     value=CANCEL,
                 )
             )
