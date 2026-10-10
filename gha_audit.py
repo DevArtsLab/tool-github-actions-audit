@@ -805,16 +805,12 @@ def main() -> None:
         wf_choices.append(
             Choice(
                 title="Cancel - quit without changes",
-                description=(
-                    "exit the picker; picks already queued from "
-                    "earlier repos are still shown for confirmation, "
-                    "never applied silently"
-                ),
+                description="back to the repository list; nothing is modified",
                 value=CANCEL,
             )
         )
-        picked = questionary.checkbox(
-            f"{sanitize(full_name)}: select workflows to STOP "
+        picked = questionary.select(
+            f"{sanitize(full_name)}: select a workflow to STOP "
             + (
                 "(repo-wide Actions is OFF - nothing can run here; "
                 "per-workflow disables still apply if re-enabled):"
@@ -823,36 +819,30 @@ def main() -> None:
             ),
             choices=wf_choices,
             style=QSTYLE,
-            instruction="space = check, enter = continue, "
-            "enter on empty = skip this repo, "
-            "ctrl+c = cancel all",
+            instruction="Enter = select",
         ).ask()
         plan: list[tuple[str, str, int | str]] = []
-        cancelled = picked is None or CANCEL in (picked or [])
-        if picked and not cancelled:
-            for pid in picked:
-                label = (
-                    "disable entire repo Actions"
-                    if pid == ALL_ACTIONS
-                    else "disable workflow "
-                    + sanitize(
-                        next(w["name"] for w in info["workflows"] if w["id"] == pid)
-                    )
+        if picked and picked != CANCEL:
+            label = (
+                "disable entire repo Actions"
+                if picked == ALL_ACTIONS
+                else "disable workflow "
+                + sanitize(
+                    next(w["name"] for w in info["workflows"] if w["id"] == picked)
                 )
-                plan.append((full_name, label, pid))
+            )
+            plan.append((full_name, label, picked))
 
         if plan:
             dirty |= confirm_and_execute(plan)
-        elif cancelled:
-            console.print("[dim]Cancelled. No changes were made.[/]")
         else:
-            console.print(f"[dim]Skipped {disp(full_name)}, no changes.[/]")
+            console.print("[dim]Cancelled. No changes were made.[/]")
 
         again = questionary.confirm(
             "Manage more repositories?",
             default=False,
             style=QSTYLE,
-            instruction="y + Enter = back to repo list, " "n + Enter or ctrl+c = exit",
+            instruction="y/n",
         ).ask()
         if not again:
             console.print("[dim]Done.[/]")
