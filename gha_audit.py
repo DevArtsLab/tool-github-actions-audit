@@ -435,7 +435,7 @@ def confirm_and_execute(
         f"Apply {len(plan)} change(s)?",
         default=False,
         style=QSTYLE,
-        instruction="No or ctrl+c = exit with no changes",
+        instruction="[y + Enter = apply] | [n + Enter = abort]",
     ).ask():
         console.print("[dim]Aborted. Nothing was changed.[/]")
         return set()
@@ -663,7 +663,8 @@ def main() -> None:
             "Manage more repositories?",
             default=False,
             style=QSTYLE,
-            instruction="Yes = back to the repo list, No/ctrl+c = exit",
+            instruction="y + Enter = back to repo list, "
+                        "n + Enter or ctrl+c = exit",
         ).ask()
         if not again:
             console.print("[dim]Done.[/]")
