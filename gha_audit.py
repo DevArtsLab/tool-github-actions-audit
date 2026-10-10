@@ -53,6 +53,7 @@ from rich.tree import Tree
 console = Console(width=max(140, shutil.get_terminal_size().columns))
 ALL_ACTIONS = "__disable_entire_repo__"
 CANCEL = "__cancel__"
+EXIT = "__exit__"
 WINDOW_DAYS = 30
 
 QSTYLE = Style(
@@ -722,6 +723,12 @@ def main() -> None:
 
     choices = [
         Choice(
+            title="Exit - quit without changes",
+            description="leave the tool; nothing is modified",
+            value=EXIT,
+        )
+    ] + [
+        Choice(
             title=sanitize(
                 f"{i['full_name']}  "
                 f"[{'fork' if meta[i['full_name']]['isFork'] else 'own'}] "
@@ -730,26 +737,34 @@ def main() -> None:
                 f"{sum(1 for w in i['workflows'] if w['state'] == 'active')}"
                 f"/{len(i['workflows'])}"
             ),
+            description=(
+                "repo-wide Actions: OFF (hard gate - nothing can run)"
+                if i.get("actions_enabled") is False
+                else (
+                    "repo-wide Actions: on"
+                    if i.get("actions_enabled")
+                    else "repo-wide Actions: unknown"
+                )
+            ),
             value=i["full_name"],
         )
         for i in rows
     ]
     dirty: set[str] = set()
     while True:
-        selected = questionary.checkbox(
-            "Select repositories to inspect/manage:",
+        selected = questionary.select(
+            "Select a repository to inspect/manage:",
             choices=choices,
             style=QSTYLE,
-            instruction="space = check, enter = continue, "
-            "enter on empty = exit, ctrl+c = cancel",
+            instruction="enter = select, ctrl+c = exit",
         ).ask()
-        if not selected:
+        if not selected or selected == EXIT:
             console.print("[dim]Done. Nothing else selected.[/]")
             return
 
         plan: list[tuple[str, str, int | str]] = []
         cancelled = False
-        for full_name in selected:
+        for full_name in [selected]:
             if full_name in dirty:
                 console.print(
                     f"[dim]Refreshing {disp(full_name)} after earlier " f"changes...[/]"

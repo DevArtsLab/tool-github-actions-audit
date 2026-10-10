@@ -33,7 +33,8 @@ uv run gha_audit.py --scan-only     # read-only table, no prompts
    touch outside GitHub (Airtable, Azure, Wayback, repo commits, secrets,
    external reusable workflows, outbound HTTP, ...), and the
    branches/events seen in the 50 most recent runs.
-2. You checkbox-select repos to inspect (empty selection exits).
+2. You pick one repo to inspect (Enter selects; `Exit` is the first
+   row). Each repo's row shows its repo-wide Actions gate state.
 3. Per repo: a detail panel shows each workflow's state, declared trigger,
    external effects, observed events/branches, last run, and billable
    minutes (via the workflow `timing` endpoint, real per-OS billable ms).
