@@ -6,6 +6,7 @@ Run: uv run --with pytest python -m pytest test_gha_audit.py -v
 """
 
 import io
+import re
 import subprocess
 
 import pytest
@@ -136,9 +137,24 @@ class TestMarkupInjection:
 
     def test_detail_table_renders_evil_input(self, monkeypatch):
         monkeypatch.setattr(ga, "console", Console(file=io.StringIO(), width=140))
-        monkeypatch.setattr(ga, "repo_actions_enabled", lambda n: True)
         monkeypatch.setattr(ga, "billable_minutes", lambda n, i: 1.5)
         ga.print_repo_detail(self._evil_repo())
+
+    @pytest.mark.parametrize("gate,cell", [(False, "OFF"), (True, "on"), (None, "?")])
+    def test_scan_table_gate_cells(self, monkeypatch, gate, cell):
+        buf = io.StringIO()
+        monkeypatch.setattr(ga, "console", Console(file=buf, width=140))
+        repo = self._evil_repo()
+        repo["actions_enabled"] = gate
+        meta = {
+            "o/evil": {
+                "nameWithOwner": "o/evil",
+                "isFork": True,
+                "isPrivate": False,
+            }
+        }
+        ga.print_scan_table([repo], meta, "s", "e")
+        assert re.search(rf"│\s+{re.escape(cell)}\s+│", buf.getvalue())
 
 
 class TestSilentApiFailures:

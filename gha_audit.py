@@ -235,11 +235,6 @@ def billable_minutes(full_name: str, wf_id: int) -> float | None:
     return ms / 60000.0
 
 
-def repo_actions_enabled(full_name: str) -> bool | None:
-    p, _err = gh_json([f"repos/{full_name}/actions/permissions"])
-    return p.get("enabled") if p else None
-
-
 def gh_text(args: list[str]) -> str | None:
     """Run `gh api <args>`; return raw stdout or None on failure."""
     proc = subprocess.run(["gh", "api", *args], capture_output=True, text=True)
@@ -452,8 +447,6 @@ def print_scan_table(
 
 def print_repo_detail(info: dict) -> None:
     enabled = info.get("actions_enabled")
-    if enabled is None:
-        enabled = repo_actions_enabled(info["full_name"])
     status = (
         "[green]enabled[/]"
         if enabled
@@ -758,92 +751,85 @@ def main() -> None:
             console.print("[dim]Done. Nothing else selected.[/]")
             return
 
-        plan: list[tuple[str, str, int | str]] = []
-        cancelled = False
-        for full_name in [selected]:
-            if full_name in dirty:
-                console.print(
-                    f"[dim]Refreshing {disp(full_name)} after earlier " f"changes...[/]"
-                )
-                scanned[full_name] = scan_repo(full_name, start, end)
-            info = scanned[full_name]
-            print_repo_detail(info)
-            active_wfs = [w for w in info["workflows"] if w.get("state") == "active"]
-            # "Disable all" first, CI-style workflow last, then Cancel.
-            # Gate already off -> the kill switch is meaningless, hide it.
-            gate_off = info.get("actions_enabled") is False
-            active_wfs.sort(key=lambda w: w["name"] == "CI")
-            wf_choices = (
-                []
-                if gate_off
-                else [
-                    Choice(
-                        title="STOP everything - disable ALL GitHub Actions "
-                        "on this repo",
-                        description=(
-                            f"runs: {disable_cmd(full_name, ALL_ACTIONS)} | "
-                            f"repo-wide hard gate: blocks every run type "
-                            f"(schedule, push, manual) plus any workflow "
-                            f"synced in later; per-workflow states are kept "
-                            f"and return if re-enabled"
-                        ),
-                        value=ALL_ACTIONS,
-                    )
-                ]
+        full_name = selected
+        if full_name in dirty:
+            console.print(
+                f"[dim]Refreshing {disp(full_name)} after earlier " f"changes...[/]"
             )
-            for w in active_wfs:
-                act = wf_activity(info, w["id"])
-                trig = w.get("trigger", "trigger unknown")
-                side_effects = (
-                    "; ".join(w.get("effects", [])) or "no external effects detected"
+            scanned[full_name] = scan_repo(full_name, start, end)
+        info = scanned[full_name]
+        print_repo_detail(info)
+        active_wfs = [w for w in info["workflows"] if w.get("state") == "active"]
+        # "Disable all" first, CI-style workflow last, then Cancel.
+        # Gate already off -> the kill switch is meaningless, hide it.
+        gate_off = info.get("actions_enabled") is False
+        active_wfs.sort(key=lambda w: w["name"] == "CI")
+        wf_choices = (
+            []
+            if gate_off
+            else [
+                Choice(
+                    title="STOP everything - disable ALL GitHub Actions "
+                    "on this repo",
+                    description=(
+                        f"runs: {disable_cmd(full_name, ALL_ACTIONS)} | "
+                        f"repo-wide hard gate: blocks every run type "
+                        f"(schedule, push, manual) plus any workflow "
+                        f"synced in later; per-workflow states are kept "
+                        f"and return if re-enabled"
+                    ),
+                    value=ALL_ACTIONS,
                 )
-                observed = sanitize(
-                    f"runs: {disable_cmd(full_name, w['id'])} | "
-                    f"stops only this workflow (shows disabled in the "
-                    f"Actions tab) | effects: {side_effects} | last ran "
-                    f"{act['last'] or 'never in recent sample'} | "
-                    f"branches seen: {', '.join(act['branches']) or 'none'}"
-                )
-                wf_choices.append(
-                    Choice(
-                        title=sanitize(
-                            f"DISABLE '{w['name']}'  |  currently runs {trig}"
-                        ),
-                        description=observed,
-                        value=w["id"],
-                    )
-                )
+            ]
+        )
+        for w in active_wfs:
+            act = wf_activity(info, w["id"])
+            trig = w.get("trigger", "trigger unknown")
+            side_effects = (
+                "; ".join(w.get("effects", [])) or "no external effects detected"
+            )
+            observed = sanitize(
+                f"runs: {disable_cmd(full_name, w['id'])} | "
+                f"stops only this workflow (shows disabled in the "
+                f"Actions tab) | effects: {side_effects} | last ran "
+                f"{act['last'] or 'never in recent sample'} | "
+                f"branches seen: {', '.join(act['branches']) or 'none'}"
+            )
             wf_choices.append(
                 Choice(
-                    title="Cancel - quit without changes",
-                    description=(
-                        "exit the picker; picks already queued from "
-                        "earlier repos are still shown for confirmation, "
-                        "never applied silently"
-                    ),
-                    value=CANCEL,
+                    title=sanitize(f"DISABLE '{w['name']}'  |  currently runs {trig}"),
+                    description=observed,
+                    value=w["id"],
                 )
             )
-            picked = questionary.checkbox(
-                f"{sanitize(full_name)}: select workflows to STOP "
-                + (
-                    "(repo-wide Actions is OFF - nothing can run here; "
-                    "per-workflow disables still apply if re-enabled):"
-                    if gate_off
-                    else "(nothing here runs workflows, " "it only disables them):"
+        wf_choices.append(
+            Choice(
+                title="Cancel - quit without changes",
+                description=(
+                    "exit the picker; picks already queued from "
+                    "earlier repos are still shown for confirmation, "
+                    "never applied silently"
                 ),
-                choices=wf_choices,
-                style=QSTYLE,
-                instruction="space = check, enter = next repo, "
-                "enter on empty = skip this repo, "
-                "ctrl+c = cancel all",
-            ).ask()
-            if picked is None or CANCEL in picked:
-                cancelled = True
-                break
-            if not picked:
-                console.print(f"[dim]Skipped {disp(full_name)}, no changes.[/]")
-                continue
+                value=CANCEL,
+            )
+        )
+        picked = questionary.checkbox(
+            f"{sanitize(full_name)}: select workflows to STOP "
+            + (
+                "(repo-wide Actions is OFF - nothing can run here; "
+                "per-workflow disables still apply if re-enabled):"
+                if gate_off
+                else "(nothing here runs workflows, it only disables them):"
+            ),
+            choices=wf_choices,
+            style=QSTYLE,
+            instruction="space = check, enter = continue, "
+            "enter on empty = skip this repo, "
+            "ctrl+c = cancel all",
+        ).ask()
+        plan: list[tuple[str, str, int | str]] = []
+        cancelled = picked is None or CANCEL in (picked or [])
+        if picked and not cancelled:
             for pid in picked:
                 label = (
                     "disable entire repo Actions"
@@ -860,7 +846,7 @@ def main() -> None:
         elif cancelled:
             console.print("[dim]Cancelled. No changes were made.[/]")
         else:
-            console.print("[dim]Nothing selected to disable.[/]")
+            console.print(f"[dim]Skipped {disp(full_name)}, no changes.[/]")
 
         again = questionary.confirm(
             "Manage more repositories?",
