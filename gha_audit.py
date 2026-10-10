@@ -53,6 +53,7 @@ from rich.tree import Tree
 console = Console(width=max(140, shutil.get_terminal_size().columns))
 ALL_ACTIONS = "__disable_entire_repo__"
 CANCEL = "__cancel__"
+EXIT = "__exit__"
 WINDOW_DAYS = 30
 
 QSTYLE = Style(
@@ -155,7 +156,13 @@ def scan_repo(full_name: str, start: str, end: str) -> dict:
         "runs": [],
         "error": None,
         "errors": [],
+        "actions_enabled": None,
     }
+    perms, err = gh_json([f"repos/{full_name}/actions/permissions"])
+    if err:
+        info["errors"].append(f"actions permissions failed: {err}")
+    else:
+        info["actions_enabled"] = perms.get("enabled")
     wf, err = gh_json([f"repos/{full_name}/actions/workflows?per_page=100"])
     if err:
         info["error"] = f"workflows list failed: {err}"
@@ -226,11 +233,6 @@ def billable_minutes(full_name: str, wf_id: int) -> float | None:
         return None
     ms = sum(v.get("total_ms", 0) for v in t.get("billable", {}).values())
     return ms / 60000.0
-
-
-def repo_actions_enabled(full_name: str) -> bool | None:
-    p, _err = gh_json([f"repos/{full_name}/actions/permissions"])
-    return p.get("enabled") if p else None
 
 
 def gh_text(args: list[str]) -> str | None:
@@ -385,7 +387,9 @@ def print_scan_table(
         caption=(
             f"All time = total workflow runs ever. Last {WINDOW_DAYS}d = "
             f"runs {start} .. {end}. Branches/Events sampled from the 50 "
-            f"most recent runs. External effects are best-effort keyword "
+            f"most recent runs. Actions = the repo-wide gate: OFF blocks "
+            f"every run type (schedule, push, manual) and any workflow "
+            f"synced in later. External effects are best-effort keyword "
             f"heuristics, not an authoritative audit."
         ),
         box=box.ROUNDED,
@@ -395,6 +399,7 @@ def print_scan_table(
     )
     table.add_column("Repo", style="cyan", no_wrap=True)
     table.add_column("Kind", justify="center")
+    table.add_column("Actions", justify="center")
     table.add_column("All time", justify="right")
     table.add_column(f"Last {WINDOW_DAYS}d", justify="right")
     table.add_column("Active workflows")
@@ -420,9 +425,14 @@ def print_scan_table(
         if m["isPrivate"]:
             kind += "[dim]/priv[/]"
         n30 = info["runs_30d"]
+        gate = info.get("actions_enabled")
+        gate_cell = (
+            "[red]OFF[/]" if gate is False else "[green]on[/]" if gate else "[dim]?[/]"
+        )
         table.add_row(
             disp(info["full_name"].split("/", 1)[-1]),
             kind,
+            gate_cell,
             str(info["runs_total"]),
             f"[{heat(n30)}]{n30}[/]",
             wf_cell or f"[dim]- ({len(wfs)} disabled)[/]",
@@ -430,17 +440,25 @@ def print_scan_table(
             ", ".join(disp(b) for b in branches[:6])
             + (" ..." if len(branches) > 6 else ""),
             ", ".join(disp(e) for e in events),
-            style="" if n30 else "dim",
+            style="" if (n30 and gate is not False) else "dim",
         )
     console.print(table)
 
 
 def print_repo_detail(info: dict) -> None:
-    enabled = repo_actions_enabled(info["full_name"])
+    enabled = info.get("actions_enabled")
     status = (
         "[green]enabled[/]"
         if enabled
-        else "[red]disabled[/]" if enabled is False else "[dim]unknown[/]"
+        else (
+            (
+                "[red]DISABLED - hard gate:[/] no run can start "
+                "[dim](schedule, push, manual, or newly synced "
+                "workflows)[/]"
+            )
+            if enabled is False
+            else "[dim]unknown[/]"
+        )
     )
     table = Table(
         box=box.ROUNDED,
@@ -645,6 +663,7 @@ def main() -> None:
                         "runs": [],
                         "error": f"scan crashed: {type(e).__name__}: {e}",
                         "errors": [],
+                        "actions_enabled": None,
                     }
                 scanned[info["full_name"]] = info
                 progress.update(
@@ -662,12 +681,14 @@ def main() -> None:
         return
 
     forks = sum(1 for i in rows if meta[i["full_name"]]["isFork"])
+    gates_off = sum(1 for i in scanned.values() if i.get("actions_enabled") is False)
     console.print(
         Panel.fit(
             f"scanned: [bold]{len(names)}[/]  |  with Actions activity: "
             f"[bold]{len(rows)}[/]  |  forks: [bold]{forks}[/]  |  "
             f"runs last {WINDOW_DAYS}d: "
-            f"[bold]{sum(i['runs_30d'] for i in rows)}[/]",
+            f"[bold]{sum(i['runs_30d'] for i in rows)}[/]  |  "
+            f"repo Actions OFF: [bold red]{gates_off}[/]",
             border_style="blue",
         )
     )
@@ -693,6 +714,10 @@ def main() -> None:
     if args.scan_only:
         return
 
+    def gate_word(i: dict) -> str:
+        g = i.get("actions_enabled")
+        return "OFF" if g is False else "on" if g else "?"
+
     choices = [
         Choice(
             title=sanitize(
@@ -701,122 +726,123 @@ def main() -> None:
                 f"30d={i['runs_30d']} all={i['runs_total']} "
                 f"active="
                 f"{sum(1 for w in i['workflows'] if w['state'] == 'active')}"
-                f"/{len(i['workflows'])}"
+                f"/{len(i['workflows'])}  "
+                f"actions={gate_word(i)}"
             ),
             value=i["full_name"],
         )
         for i in rows
+    ] + [
+        Choice(
+            title="Exit - quit without changes",
+            description="leave the tool; nothing is modified",
+            value=EXIT,
+        )
     ]
     dirty: set[str] = set()
     while True:
-        selected = questionary.checkbox(
-            "Select repositories to inspect/manage:",
+        selected = questionary.select(
+            "Select a repository to inspect/manage:",
             choices=choices,
             style=QSTYLE,
-            instruction="space = check, enter = continue, "
-            "enter on empty = exit, ctrl+c = cancel",
+            instruction="enter = select, ctrl+c = exit",
         ).ask()
-        if not selected:
+        if not selected or selected == EXIT:
             console.print("[dim]Done. Nothing else selected.[/]")
             return
 
-        plan: list[tuple[str, str, int | str]] = []
-        cancelled = False
-        for full_name in selected:
-            if full_name in dirty:
-                console.print(
-                    f"[dim]Refreshing {disp(full_name)} after earlier " f"changes...[/]"
-                )
-                scanned[full_name] = scan_repo(full_name, start, end)
-            info = scanned[full_name]
-            print_repo_detail(info)
-            active_wfs = [w for w in info["workflows"] if w.get("state") == "active"]
-            # "Disable all" first, CI-style workflow last, then Cancel.
-            active_wfs.sort(key=lambda w: w["name"] == "CI")
-            wf_choices = [
+        full_name = selected
+        if full_name in dirty:
+            console.print(
+                f"[dim]Refreshing {disp(full_name)} after earlier " f"changes...[/]"
+            )
+            scanned[full_name] = scan_repo(full_name, start, end)
+        info = scanned[full_name]
+        print_repo_detail(info)
+        active_wfs = [w for w in info["workflows"] if w.get("state") == "active"]
+        # "Disable all" first, CI-style workflow last, then Cancel.
+        # Gate already off -> the kill switch is meaningless, hide it.
+        gate_off = info.get("actions_enabled") is False
+        active_wfs.sort(key=lambda w: w["name"] == "CI")
+        wf_choices = (
+            []
+            if gate_off
+            else [
                 Choice(
                     title="STOP everything - disable ALL GitHub Actions "
                     "on this repo",
                     description=(
                         f"runs: {disable_cmd(full_name, ALL_ACTIONS)} | "
-                        f"turns off the Actions feature repo-wide (the "
-                        f"Actions tab shows 'disabled'); per-workflow "
-                        f"states are kept and return if re-enabled"
+                        f"repo-wide hard gate: blocks every run type "
+                        f"(schedule, push, manual) plus any workflow "
+                        f"synced in later; per-workflow states are kept "
+                        f"and return if re-enabled"
                     ),
                     value=ALL_ACTIONS,
                 )
             ]
-            for w in active_wfs:
-                act = wf_activity(info, w["id"])
-                trig = w.get("trigger", "trigger unknown")
-                side_effects = (
-                    "; ".join(w.get("effects", [])) or "no external effects detected"
-                )
-                observed = sanitize(
-                    f"runs: {disable_cmd(full_name, w['id'])} | "
-                    f"stops only this workflow (shows disabled in the "
-                    f"Actions tab) | effects: {side_effects} | last ran "
-                    f"{act['last'] or 'never in recent sample'} | "
-                    f"branches seen: {', '.join(act['branches']) or 'none'}"
-                )
-                wf_choices.append(
-                    Choice(
-                        title=sanitize(
-                            f"DISABLE '{w['name']}'  |  currently runs {trig}"
-                        ),
-                        description=observed,
-                        value=w["id"],
-                    )
-                )
+        )
+        for w in active_wfs:
+            act = wf_activity(info, w["id"])
+            trig = w.get("trigger", "trigger unknown")
+            side_effects = (
+                "; ".join(w.get("effects", [])) or "no external effects detected"
+            )
+            observed = sanitize(
+                f"runs: {disable_cmd(full_name, w['id'])} | "
+                f"stops only this workflow (shows disabled in the "
+                f"Actions tab) | effects: {side_effects} | last ran "
+                f"{act['last'] or 'never in recent sample'} | "
+                f"branches seen: {', '.join(act['branches']) or 'none'}"
+            )
             wf_choices.append(
                 Choice(
-                    title="Cancel - quit without changes",
-                    description=(
-                        "exit the picker; picks already queued from "
-                        "earlier repos are still shown for confirmation, "
-                        "never applied silently"
-                    ),
-                    value=CANCEL,
+                    title=sanitize(f"DISABLE '{w['name']}'  |  currently runs {trig}"),
+                    description=observed,
+                    value=w["id"],
                 )
             )
-            picked = questionary.checkbox(
-                f"{sanitize(full_name)}: select workflows to STOP "
-                f"(nothing here runs workflows, it only disables them):",
-                choices=wf_choices,
-                style=QSTYLE,
-                instruction="space = check, enter = next repo, "
-                "enter on empty = skip this repo, "
-                "ctrl+c = cancel all",
-            ).ask()
-            if picked is None or CANCEL in picked:
-                cancelled = True
-                break
-            if not picked:
-                console.print(f"[dim]Skipped {disp(full_name)}, no changes.[/]")
-                continue
-            for pid in picked:
-                label = (
-                    "disable entire repo Actions"
-                    if pid == ALL_ACTIONS
-                    else "disable workflow "
-                    + sanitize(
-                        next(w["name"] for w in info["workflows"] if w["id"] == pid)
-                    )
+        wf_choices.append(
+            Choice(
+                title="Cancel - quit without changes",
+                description="back to the repository list; nothing is modified",
+                value=CANCEL,
+            )
+        )
+        picked = questionary.select(
+            f"{sanitize(full_name)}: select a workflow to STOP "
+            + (
+                "(repo-wide Actions is OFF - nothing can run here; "
+                "per-workflow disables still apply if re-enabled):"
+                if gate_off
+                else "(nothing here runs workflows, it only disables them):"
+            ),
+            choices=wf_choices,
+            style=QSTYLE,
+            instruction="Enter = select",
+        ).ask()
+        plan: list[tuple[str, str, int | str]] = []
+        if picked and picked != CANCEL:
+            label = (
+                "disable entire repo Actions"
+                if picked == ALL_ACTIONS
+                else "disable workflow "
+                + sanitize(
+                    next(w["name"] for w in info["workflows"] if w["id"] == picked)
                 )
-                plan.append((full_name, label, pid))
+            )
+            plan.append((full_name, label, picked))
 
         if plan:
             dirty |= confirm_and_execute(plan)
-        elif cancelled:
-            console.print("[dim]Cancelled. No changes were made.[/]")
         else:
-            console.print("[dim]Nothing selected to disable.[/]")
+            console.print("[dim]Cancelled. No changes were made.[/]")
 
         again = questionary.confirm(
             "Manage more repositories?",
             default=False,
             style=QSTYLE,
-            instruction="y + Enter = back to repo list, " "n + Enter or ctrl+c = exit",
+            instruction="y/n",
         ).ask()
         if not again:
             console.print("[dim]Done.[/]")

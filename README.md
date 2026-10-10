@@ -23,23 +23,29 @@ uv run gha_audit.py --scan-only     # read-only table, no prompts
 
 ## Flow
 
-1. Scans every repo and prints a table with: **All time** run count,
+1. Scans every repo and prints a table with: the repo-wide **Actions**
+   gate (`OFF` = hard gate: no run of any type can start - schedules,
+   pushes, manual dispatch, or anything synced in later - and gated rows
+   are dimmed), **All time** run count,
    **Last 30d** run count (via the API `created=START..END` filter),
    active workflow **names** (CI, Cron, Staging, ...), an
    **External effects** column summarizing what each repo's workflows can
    touch outside GitHub (Airtable, Azure, Wayback, repo commits, secrets,
    external reusable workflows, outbound HTTP, ...), and the
    branches/events seen in the 50 most recent runs.
-2. You checkbox-select repos to inspect (empty selection exits).
+2. You pick one repo to inspect (Enter selects; `Exit` is the last
+   row). Each repo's line ends with its repo-wide Actions gate state
+   (`actions=on|OFF|?`).
 3. Per repo: a detail panel shows each workflow's state, declared trigger,
    external effects, observed events/branches, last run, and billable
    minutes (via the workflow `timing` endpoint, real per-OS billable ms).
-4. Per repo you checkbox-select what to STOP. Rows are:
-   `STOP everything - disable ALL GitHub Actions on this repo` (first),
+4. Per repo you pick one action (Enter selects). Rows are:
+   `STOP everything - disable ALL GitHub Actions on this repo` (first,
+   hidden when the repo-wide gate is already OFF),
    `DISABLE '<name>'` per active workflow (CI last), and
    `Cancel - quit without changes` (last). Every row shows the literal
    `gh api` command it would run plus its external effects, so nothing
-   is ambiguous. An empty selection skips the repo.
+   is ambiguous.
 5. A confirmation panel lists every pending change grouped by repo with
    the exact API call under each (`y + Enter` applies, anything else
    aborts).
@@ -50,7 +56,7 @@ uv run gha_audit.py --scan-only     # read-only table, no prompts
 ## Safety model
 
 - Read-only by default; `--scan-only` never prompts or writes.
-- Every disable requires explicit checkbox selection plus a final confirm.
+- Every disable requires explicit selection plus a final confirm.
 - Disabling uses the Actions REST API only:
 
   ```
