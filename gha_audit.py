@@ -721,13 +721,11 @@ def main() -> None:
     if args.scan_only:
         return
 
+    def gate_word(i: dict) -> str:
+        g = i.get("actions_enabled")
+        return "OFF" if g is False else "on" if g else "?"
+
     choices = [
-        Choice(
-            title="Exit - quit without changes",
-            description="leave the tool; nothing is modified",
-            value=EXIT,
-        )
-    ] + [
         Choice(
             title=sanitize(
                 f"{i['full_name']}  "
@@ -735,20 +733,18 @@ def main() -> None:
                 f"30d={i['runs_30d']} all={i['runs_total']} "
                 f"active="
                 f"{sum(1 for w in i['workflows'] if w['state'] == 'active')}"
-                f"/{len(i['workflows'])}"
-            ),
-            description=(
-                "repo-wide Actions: OFF (hard gate - nothing can run)"
-                if i.get("actions_enabled") is False
-                else (
-                    "repo-wide Actions: on"
-                    if i.get("actions_enabled")
-                    else "repo-wide Actions: unknown"
-                )
+                f"/{len(i['workflows'])}  "
+                f"actions={gate_word(i)}"
             ),
             value=i["full_name"],
         )
         for i in rows
+    ] + [
+        Choice(
+            title="Exit - quit without changes",
+            description="leave the tool; nothing is modified",
+            value=EXIT,
+        )
     ]
     dirty: set[str] = set()
     while True:
@@ -774,21 +770,27 @@ def main() -> None:
             print_repo_detail(info)
             active_wfs = [w for w in info["workflows"] if w.get("state") == "active"]
             # "Disable all" first, CI-style workflow last, then Cancel.
+            # Gate already off -> the kill switch is meaningless, hide it.
+            gate_off = info.get("actions_enabled") is False
             active_wfs.sort(key=lambda w: w["name"] == "CI")
-            wf_choices = [
-                Choice(
-                    title="STOP everything - disable ALL GitHub Actions "
-                    "on this repo",
-                    description=(
-                        f"runs: {disable_cmd(full_name, ALL_ACTIONS)} | "
-                        f"repo-wide hard gate: blocks every run type "
-                        f"(schedule, push, manual) plus any workflow "
-                        f"synced in later; per-workflow states are kept "
-                        f"and return if re-enabled"
-                    ),
-                    value=ALL_ACTIONS,
-                )
-            ]
+            wf_choices = (
+                []
+                if gate_off
+                else [
+                    Choice(
+                        title="STOP everything - disable ALL GitHub Actions "
+                        "on this repo",
+                        description=(
+                            f"runs: {disable_cmd(full_name, ALL_ACTIONS)} | "
+                            f"repo-wide hard gate: blocks every run type "
+                            f"(schedule, push, manual) plus any workflow "
+                            f"synced in later; per-workflow states are kept "
+                            f"and return if re-enabled"
+                        ),
+                        value=ALL_ACTIONS,
+                    )
+                ]
+            )
             for w in active_wfs:
                 act = wf_activity(info, w["id"])
                 trig = w.get("trigger", "trigger unknown")
@@ -822,7 +824,6 @@ def main() -> None:
                     value=CANCEL,
                 )
             )
-            gate_off = info.get("actions_enabled") is False
             picked = questionary.checkbox(
                 f"{sanitize(full_name)}: select workflows to STOP "
                 + (
