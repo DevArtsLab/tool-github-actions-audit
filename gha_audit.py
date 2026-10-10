@@ -38,6 +38,7 @@ import yaml
 from questionary import Choice, Style
 from rich import box
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import (
     BarColumn,
@@ -78,15 +79,36 @@ def heat(n: int) -> str:
     return "dim"
 
 
-def gh_json(args: list[str]):
-    """Run `gh api <args>`; return parsed JSON or None on failure."""
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def sanitize(s: object) -> str:
+    """Strip terminal control chars from untrusted text."""
+    return _CTRL_RE.sub("", str(s))
+
+
+def disp(s: object) -> str:
+    """sanitize() plus Rich-markup escaping; safe for any Rich render."""
+    return escape(sanitize(s))
+
+
+_OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
+
+
+def valid_owner(owner: str) -> bool:
+    """GitHub login rules: alphanumerics/hyphens, max 39 chars, no leading '-'."""
+    return bool(_OWNER_RE.match(owner))
+
+
+def gh_json(args: list[str]) -> tuple[object, str | None]:
+    """Run `gh api <args>`; return (parsed JSON, error_text)."""
     proc = subprocess.run(["gh", "api", *args], capture_output=True, text=True)
     if proc.returncode != 0:
-        return None
+        return None, proc.stderr.strip() or f"gh api exited {proc.returncode}"
     try:
-        return json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return None
+        return json.loads(proc.stdout), None
+    except json.JSONDecodeError as e:
+        return None, f"invalid JSON response: {e}"
 
 
 def gh_write(args: list[str]) -> str | None:
@@ -132,31 +154,52 @@ def scan_repo(full_name: str, start: str, end: str) -> dict:
         "runs_30d": 0,
         "runs": [],
         "error": None,
+        "errors": [],
     }
-    wf = gh_json([f"repos/{full_name}/actions/workflows"])
-    if wf is None:
-        info["error"] = "unavailable"
+    wf, err = gh_json([f"repos/{full_name}/actions/workflows?per_page=100"])
+    if err:
+        info["error"] = f"workflows list failed: {err}"
         return info
     info["workflows"] = wf.get("workflows", [])
+    total_wf = wf.get("total_count", len(info["workflows"]))
+    if total_wf > len(info["workflows"]):
+        info["errors"].append(
+            f"workflow list truncated: "
+            f"{len(info['workflows'])} of {total_wf} fetched"
+        )
     for w in info["workflows"]:
         raw = fetch_workflow_yaml(full_name, w.get("path", ""))
-        if raw:
-            w.update(analyze_workflow(full_name, raw))
-        else:
-            w.update(
-                {
+        try:
+            parsed = (
+                analyze_workflow(full_name, raw)
+                if raw
+                else {
                     "trigger": "trigger unknown (file unreadable)",
                     "tags": [],
                     "effects": [],
                     "secrets": [],
                 }
             )
-    recent = gh_json([f"repos/{full_name}/actions/runs?per_page=50"])
-    if recent:
+        except Exception as e:
+            parsed = {
+                "trigger": f"trigger unknown (unparseable: {type(e).__name__})",
+                "tags": [],
+                "effects": [],
+                "secrets": [],
+            }
+        w.update(parsed)
+    recent, err = gh_json([f"repos/{full_name}/actions/runs?per_page=50"])
+    if err:
+        info["errors"].append(f"recent runs failed: {err}")
+    else:
         info["runs_total"] = recent.get("total_count", info["runs_total"])
         info["runs"] = recent.get("workflow_runs", [])
-    win = gh_json([f"repos/{full_name}/actions/runs?per_page=1&created={start}..{end}"])
-    if win:
+    win, err = gh_json(
+        [f"repos/{full_name}/actions/runs?per_page=1&created={start}..{end}"]
+    )
+    if err:
+        info["errors"].append(f"30d window failed: {err}")
+    else:
         info["runs_30d"] = win.get("total_count", 0)
     return info
 
@@ -178,7 +221,7 @@ def wf_activity(info: dict, wf_id: int) -> dict:
 
 
 def billable_minutes(full_name: str, wf_id: int) -> float | None:
-    t = gh_json([f"repos/{full_name}/actions/workflows/{wf_id}/timing"])
+    t, _err = gh_json([f"repos/{full_name}/actions/workflows/{wf_id}/timing"])
     if not t:
         return None
     ms = sum(v.get("total_ms", 0) for v in t.get("billable", {}).values())
@@ -186,7 +229,7 @@ def billable_minutes(full_name: str, wf_id: int) -> float | None:
 
 
 def repo_actions_enabled(full_name: str) -> bool | None:
-    p = gh_json([f"repos/{full_name}/actions/permissions"])
+    p, _err = gh_json([f"repos/{full_name}/actions/permissions"])
     return p.get("enabled") if p else None
 
 
@@ -250,35 +293,52 @@ def analyze_workflow(full_name: str, raw: str) -> dict:
     """Describe a workflow's `on:` triggers and external effects."""
     info = {"trigger": "trigger unknown", "tags": [], "effects": [], "secrets": []}
     try:
-        doc = yaml.safe_load(raw) or {}
-    except yaml.YAMLError:
-        doc = {}
+        doc = yaml.safe_load(raw)
+    except Exception:
+        # YAMLError, RecursionError on hostile nesting, etc.
+        doc = None
         info["trigger"] = "trigger unknown (unparseable yaml)"
+    if not isinstance(doc, dict):
+        doc = {}
     # YAML 1.1 parses the bare key `on:` as boolean True.
-    on = doc.get("on", doc.get(True)) if doc else None
+    on = doc.get("on", doc.get(True))
     if on is None and doc:
         info["trigger"] = "trigger not declared"
     if on is not None:
         if isinstance(on, str):
             on = [on]
         if isinstance(on, list):
-            on = {k: None for k in on}
+            on = {k: None for k in on if isinstance(k, str)}
+        if not isinstance(on, dict):
+            on = {}
         parts = []
         if "push" in on:
-            cfg = on.get("push") or {}
+            cfg = on.get("push")
             br = cfg.get("branches") if isinstance(cfg, dict) else None
+            if isinstance(br, str):
+                br = [br]
+            if isinstance(br, list):
+                br = [b for b in br if isinstance(b, (str, int, float))]
+            else:
+                br = None
             parts.append(
                 "when code is pushed" + (f" to {', '.join(map(str, br))}" if br else "")
             )
         if "pull_request" in on:
             parts.append("when a pull request is opened/updated")
         if "schedule" in on:
-            crons = [
-                c.get("cron") for c in (on.get("schedule") or []) if isinstance(c, dict)
-            ]
+            sched = on.get("schedule")
+            crons = (
+                [
+                    str(c.get("cron"))
+                    for c in sched
+                    if isinstance(c, dict) and c.get("cron") is not None
+                ]
+                if isinstance(sched, list)
+                else []
+            )
             parts.append(
-                "on a schedule (cron)"
-                + (f": {'; '.join(map(str, crons))}" if crons else "")
+                "on a schedule (cron)" + (f": {'; '.join(crons)}" if crons else "")
             )
         if "workflow_dispatch" in on:
             parts.append("when run manually")
@@ -325,7 +385,8 @@ def print_scan_table(
         caption=(
             f"All time = total workflow runs ever. Last {WINDOW_DAYS}d = "
             f"runs {start} .. {end}. Branches/Events sampled from the 50 "
-            f"most recent runs."
+            f"most recent runs. External effects are best-effort keyword "
+            f"heuristics, not an authoritative audit."
         ),
         box=box.ROUNDED,
         header_style="bold cyan",
@@ -344,7 +405,7 @@ def print_scan_table(
         m = meta[info["full_name"]]
         wfs = info["workflows"]
         active_names = [w["name"] for w in wfs if w.get("state") == "active"]
-        wf_cell = ", ".join(active_names)
+        wf_cell = ", ".join(disp(n) for n in active_names)
         if len(active_names) < len(wfs):
             wf_cell += f"  [dim]({len(active_names)}/{len(wfs)} active)[/]"
         tags = sorted({t for w in wfs for t in w.get("tags", [])})
@@ -360,14 +421,15 @@ def print_scan_table(
             kind += "[dim]/priv[/]"
         n30 = info["runs_30d"]
         table.add_row(
-            info["full_name"].split("/", 1)[-1],
+            disp(info["full_name"].split("/", 1)[-1]),
             kind,
             str(info["runs_total"]),
             f"[{heat(n30)}]{n30}[/]",
             wf_cell or f"[dim]- ({len(wfs)} disabled)[/]",
             "[yellow]" + ", ".join(tags) + "[/]" if tags else "[dim]none[/]",
-            ", ".join(branches[:6]) + (" ..." if len(branches) > 6 else ""),
-            ", ".join(events),
+            ", ".join(disp(b) for b in branches[:6])
+            + (" ..." if len(branches) > 6 else ""),
+            ", ".join(disp(e) for e in events),
             style="" if n30 else "dim",
         )
     console.print(table)
@@ -402,25 +464,27 @@ def print_repo_detail(info: dict) -> None:
             "active": f"[green]{state}[/]",
             "disabled_manually": f"[yellow]{state}[/]",
             "disabled_inactivity": f"[red]{state}[/]",
-        }.get(state, state)
+        }.get(state, disp(state))
         mins_cell = (
             f"[{heat(int(mins))}]{mins:.1f}[/]" if mins is not None else "[dim]n/a[/]"
         )
-        effects = "; ".join(w.get("effects", [])) or "[dim]none detected[/]"
+        effects = (
+            "; ".join(disp(e) for e in w.get("effects", [])) or "[dim]none detected[/]"
+        )
         table.add_row(
-            w["name"],
+            disp(w["name"]),
             colored,
-            w["path"].split("/")[-1],
+            disp(w["path"].split("/")[-1]),
             effects,
-            ", ".join(act["events"]) or "[dim]none seen[/]",
-            ", ".join(act["branches"]) or "[dim]none seen[/]",
+            ", ".join(disp(e) for e in act["events"]) or "[dim]none seen[/]",
+            ", ".join(disp(b) for b in act["branches"]) or "[dim]none seen[/]",
             act["last"] or "[dim]none seen[/]",
             mins_cell,
         )
     console.print(
         Panel(
             table,
-            title=f"[bold]{info['full_name']}[/]",
+            title=f"[bold]{disp(info['full_name'])}[/]",
             subtitle=f"repo-wide Actions: {status}",
             border_style="blue",
         )
@@ -438,9 +502,9 @@ def confirm_and_execute(
 
     tree = Tree(f"[bold red]{len(plan)} pending change(s)[/]")
     for repo, items in by_repo.items():
-        node = tree.add(f"[cyan]{repo}[/]")
+        node = tree.add(f"[cyan]{disp(repo)}[/]")
         for label, wf_id in items:
-            node.add(f"{label}\n[dim]$ {disable_cmd(repo, wf_id)}[/]")
+            node.add(f"{disp(label)}\n[dim]$ {disp(disable_cmd(repo, wf_id))}[/]")
     console.print(
         Panel(
             tree,
@@ -490,9 +554,13 @@ def confirm_and_execute(
                 ]
             )
         results.add_row(
-            repo,
-            label,
-            "[bold green]done[/]" if err is None else f"[bold red]failed: {err}[/]",
+            disp(repo),
+            disp(label),
+            (
+                "[bold green]done[/]"
+                if err is None
+                else f"[bold red]failed: {disp(err)}[/]"
+            ),
         )
     console.print(results)
     return set(by_repo)
@@ -515,12 +583,23 @@ def main() -> None:
     args = ap.parse_args()
 
     owner = args.owner or authed_login()
-    if not owner:
+    if owner and not valid_owner(owner):
+        sys.exit(
+            f"Invalid owner {owner!r}: expected a GitHub user/org login "
+            "(alphanumerics and hyphens, max 39 chars)."
+        )
+    while not owner:
         owner = questionary.text(
             "GitHub owner (user or org) to audit:", style=QSTYLE
         ).ask()
         if not owner:
             sys.exit("No owner given.")
+        if not valid_owner(owner):
+            console.print(
+                "[red]Not a valid GitHub login (alphanumerics and "
+                "hyphens, max 39 chars).[/]"
+            )
+            owner = None
 
     start = (date.today() - timedelta(days=WINDOW_DAYS)).isoformat()
     end = date.today().isoformat()
@@ -535,6 +614,11 @@ def main() -> None:
     )
 
     repos = list_repos(owner)
+    if len(repos) >= 1000:
+        console.print(
+            "[yellow]warning: repo listing hit the 1000 limit - "
+            "some repos may be missing from this audit[/]"
+        )
     meta = {r["nameWithOwner"]: r for r in repos}
     names = [r["nameWithOwner"] for r in repos if not args.forks_only or r["isFork"]]
 
@@ -550,7 +634,18 @@ def main() -> None:
         with ThreadPoolExecutor(max_workers=8) as ex:
             futures = {ex.submit(scan_repo, n, start, end): n for n in names}
             for fut in as_completed(futures):
-                info = fut.result()
+                try:
+                    info = fut.result()
+                except Exception as e:
+                    info = {
+                        "full_name": futures[fut],
+                        "workflows": [],
+                        "runs_total": 0,
+                        "runs_30d": 0,
+                        "runs": [],
+                        "error": f"scan crashed: {type(e).__name__}: {e}",
+                        "errors": [],
+                    }
                 scanned[info["full_name"]] = info
                 progress.update(
                     task,
@@ -576,6 +671,23 @@ def main() -> None:
             border_style="blue",
         )
     )
+    failed = [i for i in scanned.values() if i.get("error")]
+    partial = [i for i in scanned.values() if i.get("errors")]
+    if failed or partial:
+        warn = Tree("[bold]audit may be incomplete[/]")
+        for i in failed:
+            warn.add(f"[red]{disp(i['full_name'])}[/]: {disp(i['error'])}")
+        for i in partial:
+            for e in i["errors"]:
+                warn.add(f"[yellow]{disp(i['full_name'])}[/]: {disp(e)}")
+        console.print(
+            Panel(
+                warn,
+                title=f"[bold yellow]{len(failed) + len(partial)} "
+                "repo(s) failed or partially scanned[/]",
+                border_style="yellow",
+            )
+        )
     print_scan_table(rows, meta, start, end)
 
     if args.scan_only:
@@ -583,7 +695,7 @@ def main() -> None:
 
     choices = [
         Choice(
-            title=(
+            title=sanitize(
                 f"{i['full_name']}  "
                 f"[{'fork' if meta[i['full_name']]['isFork'] else 'own'}] "
                 f"30d={i['runs_30d']} all={i['runs_total']} "
@@ -613,7 +725,7 @@ def main() -> None:
         for full_name in selected:
             if full_name in dirty:
                 console.print(
-                    f"[dim]Refreshing {full_name} after earlier " f"changes...[/]"
+                    f"[dim]Refreshing {disp(full_name)} after earlier " f"changes...[/]"
                 )
                 scanned[full_name] = scan_repo(full_name, start, end)
             info = scanned[full_name]
@@ -640,7 +752,7 @@ def main() -> None:
                 side_effects = (
                     "; ".join(w.get("effects", [])) or "no external effects detected"
                 )
-                observed = (
+                observed = sanitize(
                     f"runs: {disable_cmd(full_name, w['id'])} | "
                     f"stops only this workflow (shows disabled in the "
                     f"Actions tab) | effects: {side_effects} | last ran "
@@ -649,7 +761,9 @@ def main() -> None:
                 )
                 wf_choices.append(
                     Choice(
-                        title=(f"DISABLE '{w['name']}'  |  " f"currently runs {trig}"),
+                        title=sanitize(
+                            f"DISABLE '{w['name']}'  |  currently runs {trig}"
+                        ),
                         description=observed,
                         value=w["id"],
                     )
@@ -666,7 +780,7 @@ def main() -> None:
                 )
             )
             picked = questionary.checkbox(
-                f"{full_name}: select workflows to STOP "
+                f"{sanitize(full_name)}: select workflows to STOP "
                 f"(nothing here runs workflows, it only disables them):",
                 choices=wf_choices,
                 style=QSTYLE,
@@ -678,14 +792,16 @@ def main() -> None:
                 cancelled = True
                 break
             if not picked:
-                console.print(f"[dim]Skipped {full_name}, no changes.[/]")
+                console.print(f"[dim]Skipped {disp(full_name)}, no changes.[/]")
                 continue
             for pid in picked:
                 label = (
                     "disable entire repo Actions"
                     if pid == ALL_ACTIONS
                     else "disable workflow "
-                    + next(w["name"] for w in info["workflows"] if w["id"] == pid)
+                    + sanitize(
+                        next(w["name"] for w in info["workflows"] if w["id"] == pid)
+                    )
                 )
                 plan.append((full_name, label, pid))
 
