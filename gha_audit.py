@@ -406,8 +406,11 @@ def print_repo_detail(info: dict) -> None:
     )
 
 
-def confirm_and_execute(plan: list[tuple[str, str, int | None]]) -> None:
-    """plan entries: (repo_full_name, label, workflow_id|ALL_ACTIONS)."""
+def confirm_and_execute(
+    plan: list[tuple[str, str, int | None]],
+) -> set[str]:
+    """plan entries: (repo_full_name, label, workflow_id|ALL_ACTIONS).
+    Returns the set of repos actually modified (empty if aborted)."""
     by_repo: dict[str, list[tuple[str, object]]] = {}
     for repo, label, wf_id in plan:
         by_repo.setdefault(repo, []).append((label, wf_id))
@@ -435,7 +438,7 @@ def confirm_and_execute(plan: list[tuple[str, str, int | None]]) -> None:
         instruction="No or ctrl+c = exit with no changes",
     ).ask():
         console.print("[dim]Aborted. Nothing was changed.[/]")
-        return
+        return set()
 
     results = Table(
         title="Results",
@@ -463,6 +466,7 @@ def confirm_and_execute(plan: list[tuple[str, str, int | None]]) -> None:
             else f"[bold red]failed: {err}[/]",
         )
     console.print(results)
+    return set(by_repo)
 
 
 def main() -> None:
@@ -555,98 +559,115 @@ def main() -> None:
         )
         for i in rows
     ]
-    selected = questionary.checkbox(
-        "Select repositories to inspect/manage:",
-        choices=choices,
-        style=QSTYLE,
-        instruction="space = check, enter = continue, "
-                    "enter on empty = exit, ctrl+c = cancel",
-    ).ask()
-    if selected is None:
-        console.print("[dim]Cancelled. No changes were made.[/]")
-        return
-    if not selected:
-        console.print("[dim]No repositories selected. Done, "
-                      "nothing changed.[/]")
-        return
+    dirty: set[str] = set()
+    while True:
+        selected = questionary.checkbox(
+            "Select repositories to inspect/manage:",
+            choices=choices,
+            style=QSTYLE,
+            instruction="space = check, enter = continue, "
+                        "enter on empty = exit, ctrl+c = cancel",
+        ).ask()
+        if not selected:
+            console.print("[dim]Done. Nothing else selected.[/]")
+            return
 
-    plan: list[tuple[str, str, int | None]] = []
-    for full_name in selected:
-        info = scanned[full_name]
-        print_repo_detail(info)
-        active_wfs = [w for w in info["workflows"]
-                      if w.get("state") == "active"]
-        # "Disable all" first, CI-style workflow last, then Cancel.
-        active_wfs.sort(key=lambda w: w["name"] == "CI")
-        wf_choices = [
-            Choice(
-                title="STOP everything - disable ALL GitHub Actions "
-                      "on this repo",
-                description=(
-                    f"runs: {disable_cmd(full_name, ALL_ACTIONS)} | turns "
-                    f"off the Actions feature repo-wide (the Actions tab "
-                    f"shows 'disabled'); per-workflow states are kept and "
-                    f"return if re-enabled"
-                ),
-                value=ALL_ACTIONS,
-            )
-        ]
-        for w in active_wfs:
-            act = wf_activity(info, w["id"])
-            trig = w.get("trigger", "trigger unknown")
-            side_effects = (
-                "; ".join(w.get("effects", []))
-                or "no external effects detected"
-            )
-            observed = (
-                f"runs: {disable_cmd(full_name, w['id'])} | "
-                f"stops only this workflow (shows disabled in the "
-                f"Actions tab) | effects: {side_effects} | last ran "
-                f"{act['last'] or 'never in recent sample'} | "
-                f"branches seen: {', '.join(act['branches']) or 'none'}"
-            )
+        plan: list[tuple[str, str, int | None]] = []
+        cancelled = False
+        for full_name in selected:
+            if full_name in dirty:
+                console.print(
+                    f"[dim]Refreshing {full_name} after earlier "
+                    f"changes...[/]"
+                )
+                scanned[full_name] = scan_repo(full_name, start, end)
+            info = scanned[full_name]
+            print_repo_detail(info)
+            active_wfs = [w for w in info["workflows"]
+                          if w.get("state") == "active"]
+            # "Disable all" first, CI-style workflow last, then Cancel.
+            active_wfs.sort(key=lambda w: w["name"] == "CI")
+            wf_choices = [
+                Choice(
+                    title="STOP everything - disable ALL GitHub Actions "
+                          "on this repo",
+                    description=(
+                        f"runs: {disable_cmd(full_name, ALL_ACTIONS)} | "
+                        f"turns off the Actions feature repo-wide (the "
+                        f"Actions tab shows 'disabled'); per-workflow "
+                        f"states are kept and return if re-enabled"
+                    ),
+                    value=ALL_ACTIONS,
+                )
+            ]
+            for w in active_wfs:
+                act = wf_activity(info, w["id"])
+                trig = w.get("trigger", "trigger unknown")
+                side_effects = (
+                    "; ".join(w.get("effects", []))
+                    or "no external effects detected"
+                )
+                observed = (
+                    f"runs: {disable_cmd(full_name, w['id'])} | "
+                    f"stops only this workflow (shows disabled in the "
+                    f"Actions tab) | effects: {side_effects} | last ran "
+                    f"{act['last'] or 'never in recent sample'} | "
+                    f"branches seen: {', '.join(act['branches']) or 'none'}"
+                )
+                wf_choices.append(
+                    Choice(
+                        title=(f"DISABLE '{w['name']}'  |  "
+                               f"currently runs {trig}"),
+                        description=observed,
+                        value=w["id"],
+                    )
+                )
             wf_choices.append(
                 Choice(
-                    title=f"DISABLE '{w['name']}'  |  currently runs {trig}",
-                    description=observed,
-                    value=w["id"],
+                    title="Cancel - quit without changes",
+                    description="exit now; nothing is modified",
+                    value=CANCEL,
                 )
             )
-        wf_choices.append(
-            Choice(
-                title="Cancel - quit without changes",
-                description="exit now; nothing is modified",
-                value=CANCEL,
-            )
-        )
-        picked = questionary.checkbox(
-            f"{full_name}: select workflows to STOP "
-            f"(nothing here runs workflows, it only disables them):",
-            choices=wf_choices,
-            style=QSTYLE,
-            instruction="space = check, enter = next repo, "
-                        "enter on empty = skip this repo, "
-                        "ctrl+c = cancel all",
-        ).ask()
-        if picked is None or CANCEL in picked:
-            console.print("[dim]Cancelled. No changes were made.[/]")
-            return
-        if not picked:
-            console.print(f"[dim]Skipped {full_name}, no changes.[/]")
-            continue
-        for pid in picked:
-            label = ("disable entire repo Actions"
-                     if pid == ALL_ACTIONS
-                     else "disable workflow "
-                          + next(w["name"] for w in info["workflows"]
-                                 if w["id"] == pid))
-            plan.append((full_name, label, pid))
+            picked = questionary.checkbox(
+                f"{full_name}: select workflows to STOP "
+                f"(nothing here runs workflows, it only disables them):",
+                choices=wf_choices,
+                style=QSTYLE,
+                instruction="space = check, enter = next repo, "
+                            "enter on empty = skip this repo, "
+                            "ctrl+c = cancel all",
+            ).ask()
+            if picked is None or CANCEL in picked:
+                cancelled = True
+                break
+            if not picked:
+                console.print(f"[dim]Skipped {full_name}, no changes.[/]")
+                continue
+            for pid in picked:
+                label = ("disable entire repo Actions"
+                         if pid == ALL_ACTIONS
+                         else "disable workflow "
+                              + next(w["name"] for w in info["workflows"]
+                                     if w["id"] == pid))
+                plan.append((full_name, label, pid))
 
-    if not plan:
-        console.print("[dim]Nothing selected to disable. Done, "
-                      "nothing changed.[/]")
-        return
-    confirm_and_execute(plan)
+        if plan:
+            dirty |= confirm_and_execute(plan)
+        elif cancelled:
+            console.print("[dim]Cancelled. No changes were made.[/]")
+        else:
+            console.print("[dim]Nothing selected to disable.[/]")
+
+        again = questionary.confirm(
+            "Manage more repositories?",
+            default=False,
+            style=QSTYLE,
+            instruction="Yes = back to the repo list, No/ctrl+c = exit",
+        ).ask()
+        if not again:
+            console.print("[dim]Done.[/]")
+            return
 
 
 if __name__ == "__main__":
