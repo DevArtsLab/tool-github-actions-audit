@@ -1,4 +1,6 @@
-# tool-github-actions-audit
+# Tool: GitHub Actions Audit
+
+## Overview
 
 Interactive auditor for GitHub Actions usage across a user or org account.
 Built for finding "minute eaters": forks and stale repos whose inherited or
