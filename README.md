@@ -68,11 +68,26 @@ uv run gha_audit.py --scan-only     # read-only table, no prompts
   restores previous per-workflow states.
 - The tool never runs workflows, syncs forks, commits, or pushes; every
   subprocess call is `gh api` (reads plus the two disable PUTs above).
+- Untrusted input is hardened: workflow YAML parse failures degrade to
+  "unparseable" instead of crashing the audit, all GitHub-sourced strings
+  are sanitized/Rich-escaped before display, `--owner` is validated as a
+  GitHub login, and failed API calls are reported in a warning panel
+  rather than silently treated as "no data".
 
 - Forks are the usual leak: they inherit `.github/workflows` from
   upstream, and `schedule:` cron workflows keep firing on the fork's
   default branch. Any push (e.g. a fork sync) also triggers `push`
   workflows.
+
+## Tests
+
+```bash
+uv run --with pytest --with "questionary>=2.1" --with "rich>=13.7" \
+    --with "pyyaml>=6.0" python -m pytest test_gha_audit.py -v
+```
+
+Regression tests cover malformed-YAML resilience, Rich markup/escape
+injection, API error visibility, owner validation, and pagination.
 
 ## Notes
 
