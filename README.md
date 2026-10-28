@@ -85,6 +85,33 @@ uv run gha_audit.py --scan-only     # read-only table, no prompts
   default branch. Any push (e.g. a fork sync) also triggers `push`
   workflows.
 
+## token_audit.py
+
+Read-only owner-credential audit supporting the A6 hardening control
+(DEV-120): flags credentials that should be short-lived or rotated.
+
+```bash
+uv run token_audit.py            # full report
+uv run token_audit.py --json     # machine-readable, exits 1 on findings
+```
+
+Checks:
+
+- `gh` CLI token class (OAuth vs classic PAT vs fine-grained PAT).
+- GitHub Actions secrets across user + org repos: credential-shaped
+  names and secrets not rotated in 90+ days.
+- Cloudflare user API tokens: name, status, expiry. Needs
+  `CLOUDFLARE_API_TOKEN` or `CF_API_TOKEN` in env; skipped otherwise.
+- Local `.github/workflows` under `--scan-root` (default
+  `~/projects/devartslab`): literal committed tokens and
+  `secrets.*` references.
+- Local agent/tool configs (`~/.agents`, `~/.config/devin`,
+  `~/.codeium`, `~/.cursor`, `~/.claude.json`): credential-shaped
+  variable names only; values are never read or printed.
+
+Read-only, always. Exit code 1 when findings exist so it can run in CI
+or the monthly review (DEV-121).
+
 ## Tests
 
 ```bash
