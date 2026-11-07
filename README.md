@@ -105,7 +105,7 @@ Checks:
 - Local `.github/workflows` under `--scan-root` (default
   `~/projects/devartslab`): literal committed tokens and
   `secrets.*` references.
-- Local agent/tool configs (`~/.agents`, `~/.config/devin`,
+- Local agent/tool configs (`$AGENT_CONFIG_HOME`, `~/.config/devin`,
   `~/.codeium`, `~/.cursor`, `~/.claude.json`): credential-shaped
   variable names only; values are never read or printed.
 
